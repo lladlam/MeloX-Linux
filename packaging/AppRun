@@ -1,0 +1,14 @@
+#!/bin/sh
+# jpackage's native launcher aborts on this KDE Wayland session
+# ("pure virtual method called"). Start the bundled JVM directly.
+HERE="$(dirname "$(readlink -f "$0")")"
+APP="$HERE/usr/MeloX"
+JAVA="$APP/lib/runtime/bin/java"
+CP=$(find "$APP/lib/app" -name '*.jar' | tr '\n' ':')
+cd "$HOME" || cd /
+exec "$JAVA" \
+  -Dskiko.library.path="$APP/lib/app" \
+  -Dcompose.application.configure.swing.globals=true \
+  -Dcompose.application.resources.dir="$APP/lib/app/resources" \
+  -cp "$CP" \
+  melox.MainKt "$@"

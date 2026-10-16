@@ -1,0 +1,148 @@
+import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
+plugins {
+    alias(libs.plugins.kotlin.multiplatform)
+    alias(libs.plugins.kotlin.plugin.serialization)
+    alias(libs.plugins.compose.gradle.plugin)
+    alias(libs.plugins.kotlin.plugin.compose)
+}
+
+kotlin {
+    jvm("desktop") {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_17)
+        }
+    }
+
+    sourceSets {
+        val desktopMain by getting {
+            resources.srcDir("src/main/resources")
+            dependencies {
+                implementation(project(":shared"))
+                implementation(libs.kotlinx.coroutines)
+                implementation(libs.kotlinx.coroutines.swing)
+                implementation(libs.okhttp)
+                implementation(libs.org.json)
+                implementation(compose.ui)
+                implementation(compose.runtime)
+                implementation(compose.material3)
+                implementation(compose.desktop.currentOs)
+            }
+        }
+    }
+}
+
+compose.desktop {
+    application {
+        mainClass = "melox.MainKt"
+        nativeDistributions {
+            targetFormats(TargetFormat.AppImage)
+            packageName = "MeloX"
+            packageVersion = "1.0.0"
+            description = "MeloX Music Player for Linux"
+            vendor = "MeloX"
+            modules(
+                "java.instrument",
+                "java.management",
+                "java.prefs",
+                "java.sql",
+                "jdk.unsupported",
+                "jdk.crypto.ec",
+                "jdk.localedata",
+                "jdk.accessibility",
+                "jdk.httpserver"
+            )
+            linux {
+                shortcut = true
+                packageName = "melox"
+                appCategory = "AudioVideo"
+            }
+        }
+    }
+}
+
+// Production JVM flags (jpackage java-options) must be the flags every replay runs under.
+val productionJvmArgs = listOf("-Xms16m", "-Xmx1g", "-XX:+UseSerialGC", "-Dfile.encoding=UTF-8")
+
+tasks.register<JavaExec>("captureUi") {
+    group = "verification"
+    description = "Capture the production app offscreen and replay coordinate clicks."
+    dependsOn("desktopMainClasses")
+    val compilation = kotlin.targets.getByName("desktop").compilations.getByName("main")
+    classpath = files(compilation.output.allOutputs, compilation.runtimeDependencyFiles)
+    mainClass.set("melox.validation.MeloXVisualCaptureKt")
+    jvmArgs(providers.gradleProperty("captureJvmArgs").orNull?.split(' ')?.filter(String::isNotBlank)
+        ?: productionJvmArgs)
+    systemProperty("java.awt.headless", "true")
+    systemProperty("user.home", providers.gradleProperty("captureHome").getOrElse(layout.buildDirectory.dir("parity/home").get().asFile.absolutePath))
+    val argumentFile = providers.gradleProperty("captureArgsFile").orNull
+    args(if (argumentFile != null) file(argumentFile).readLines(Charsets.UTF_8)
+        else providers.gradleProperty("captureArgs").getOrElse("").split(' ').filter { it.isNotBlank() })
+}
+
+tasks.register<JavaExec>("auditLyricRaster") {
+    group = "verification"
+    description = "Compare production individual glyphs against their own shaped text layout at Windows DPI scales."
+    dependsOn("desktopMainClasses")
+    val compilation = kotlin.targets.getByName("desktop").compilations.getByName("main")
+    classpath = files(compilation.output.allOutputs, compilation.runtimeDependencyFiles)
+    mainClass.set("melox.validation.MeloXLyricRasterAuditKt")
+    systemProperty("java.awt.headless", "true")
+    systemProperty("user.home", layout.buildDirectory.dir("verification/lyric-raster-home").get().asFile.absolutePath)
+    args(layout.buildDirectory.dir("verification/lyric-raster").get().asFile.absolutePath)
+}
+
+tasks.register<JavaExec>("auditFontMetrics") {
+    group = "verification"
+    dependsOn("desktopMainClasses")
+    val compilation = kotlin.targets.getByName("desktop").compilations.getByName("main")
+    classpath = files(compilation.output.allOutputs, compilation.runtimeDependencyFiles)
+    mainClass.set("melox.validation.MeloXFontMetricsAuditKt")
+    systemProperty("java.awt.headless", "true")
+    systemProperty("user.home", layout.buildDirectory.dir("verification/font-metrics-home").get().asFile.absolutePath)
+    args(layout.buildDirectory.dir("verification/font-metrics").get().asFile.absolutePath)
+}
+
+tasks.register<JavaExec>("auditArtworkMemory") {
+    group = "verification"
+    description = "Stress the production decoded artwork budget and record real heap/resident measurements."
+    dependsOn("desktopMainClasses")
+    val compilation = kotlin.targets.getByName("desktop").compilations.getByName("main")
+    classpath = files(compilation.output.allOutputs, compilation.runtimeDependencyFiles)
+    mainClass.set("melox.validation.MeloXArtworkMemoryAuditKt")
+    systemProperty("java.awt.headless", "true")
+    args(layout.buildDirectory.dir("verification/artwork-memory").get().asFile.absolutePath)
+}
+
+tasks.register<JavaExec>("auditArtworkDecode") {
+    group = "verification"
+    dependsOn("desktopMainClasses")
+    val compilation = kotlin.targets.getByName("desktop").compilations.getByName("main")
+    classpath = files(compilation.output.allOutputs, compilation.runtimeDependencyFiles)
+    mainClass.set("melox.validation.MeloXArtworkDecodeAuditKt")
+    systemProperty("java.awt.headless", "true")
+    args(layout.buildDirectory.file("verification/artwork-decode.json").get().asFile.absolutePath)
+}
+
+tasks.register<JavaExec>("auditSettingsIcons") {
+    group = "verification"
+    description = "Check every pinned settings row icon against the pinned Android SF Symbol mapping."
+    dependsOn("desktopMainClasses")
+    val compilation = kotlin.targets.getByName("desktop").compilations.getByName("main")
+    classpath = files(compilation.output.allOutputs, compilation.runtimeDependencyFiles)
+    mainClass.set("melox.validation.MeloXSettingsIconAuditKt")
+    systemProperty("java.awt.headless", "true")
+    args(rootProject.layout.projectDirectory.file("parity/3f877ea/evidence/settings-pages-source-audit.json").asFile.absolutePath,
+        layout.buildDirectory.file("verification/settings-icons.json").get().asFile.absolutePath)
+}
+
+tasks.register<JavaExec>("auditDisplayAwake") {
+    group = "verification"
+    description = "Acquire/release the real Windows display power request on one owner thread."
+    dependsOn("desktopMainClasses")
+    val compilation = kotlin.targets.getByName("desktop").compilations.getByName("main")
+    classpath = files(compilation.output.allOutputs, compilation.runtimeDependencyFiles)
+    mainClass.set("melox.validation.MeloXDisplayAwakeAuditKt")
+    args(layout.buildDirectory.file("verification/display-awake.json").get().asFile.absolutePath)
+}

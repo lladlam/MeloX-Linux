@@ -1,0 +1,10 @@
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+.idea/
+*.iml
+.kotlin/
+local.properties
+packaging/AppDir/
+packaging/appimagetool
+*.AppImage

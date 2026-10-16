@@ -1,0 +1,5 @@
+desktop/src/main/resources/decoder/ffmpeg filter=lfs diff=lfs merge=lfs -text
+desktop/src/main/resources/fonts/*.ttf -text
+desktop/src/main/resources/parity/*.json text eol=lf
+desktop/src/main/resources/parity/*.properties text eol=lf
+desktop/src/main/resources/legal/*.md text eol=lf

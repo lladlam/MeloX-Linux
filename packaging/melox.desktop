@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=MeloX
+Comment=MeloX music player
+Exec=melox
+Icon=melox
+Type=Application
+Categories=AudioVideo;Audio;Player;
+Terminal=false
+StartupWMClass=melox.MainKt
