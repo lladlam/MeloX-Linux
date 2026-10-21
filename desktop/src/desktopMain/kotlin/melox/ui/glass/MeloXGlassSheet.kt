@@ -22,6 +22,9 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
@@ -69,7 +72,7 @@ fun MeloXGlassSheet(
     }
     val requestDismiss = { onDismiss() }
     val dark = isDark(MaterialTheme.colorScheme.background)
-    val hasBackdrop = LocalMeloXBackdrop.current
+    val hasBackdrop = meloXGlassAvailable()
     val sheetTint = when {
         hasBackdrop && dark -> Color.White.copy(alpha = 0.08f)
         hasBackdrop -> Color.White.copy(alpha = 0.34f)
@@ -151,13 +154,26 @@ fun MeloXGlassDialog(
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    if (melox.ui.desktop.LocalDesktopSettingsPresentation.current || melox.settings.MeloXSettingsRuntime.desktopLayoutEnabled) {
+        if (visible) Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+            androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                androidx.compose.material3.Surface(modifier.widthIn(min = 360.dp, max = 520.dp)
+                    .fillMaxWidth(.9f).heightIn(max = (maxHeight - 48.dp).coerceAtLeast(240.dp)),
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp)) {
+                    Column(Modifier.padding(20.dp).verticalScroll(rememberScrollState()),
+                        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp), content = content)
+                }
+            }
+        }
+        return
+    }
     val visibility = remember { MutableTransitionState(visible) }
     LaunchedEffect(visible) {
         visibility.targetState = visible
     }
     val requestDismiss = { onDismiss() }
     val dark = isDark(MaterialTheme.colorScheme.background)
-    val hasBackdrop = LocalMeloXBackdrop.current
+    val hasBackdrop = meloXGlassAvailable()
     val dialogTint = when {
         hasBackdrop && dark -> Color.White.copy(alpha = 0.08f)
         hasBackdrop -> Color.White.copy(alpha = 0.34f)

@@ -1,11 +1,44 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.security.MessageDigest
 
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.kotlin.plugin.serialization)
     alias(libs.plugins.compose.gradle.plugin)
     alias(libs.plugins.kotlin.plugin.compose)
+}
+
+// Compile the exact pinned geometry sources against our Compose version. Capsule's
+// published binary is Android-only; neither artifact may upgrade the desktop UI stack.
+val pinnedGlassGeometrySources = configurations.create("pinnedGlassGeometrySources") { isTransitive = false }
+dependencies {
+    add(pinnedGlassGeometrySources.name, "io.github.kyant0:capsule:2.1.3:sources@jar")
+    add(pinnedGlassGeometrySources.name, "io.github.kyant0:shapes:1.2.0:sources@jar")
+}
+val extractPinnedGlassGeometry by tasks.registering(Sync::class) {
+    from(provider { pinnedGlassGeometrySources.files.map { zipTree(it) } }) {
+        include("**/*.kt")
+        exclude("**/PathSegment.kt") // Local adapter replaces Android Path/RectF calls.
+        eachFile { path = path.removePrefix("commonMain/") }
+        filter { line: String ->
+            line.replace(Regex("import androidx\\.annotation\\.(FloatRange|IntRange)"), "")
+                .replace(Regex("@(?:param:)?(FloatRange|IntRange)\\([^)]*\\)\\s*"), "")
+        }
+        includeEmptyDirs = false
+    }
+    into(layout.buildDirectory.dir("generated/pinnedGlassGeometry"))
+    doFirst {
+        val hashes = mapOf(
+            "capsule-2.1.3-sources.jar" to "219abe78d1c13b11d3fa976b527e4988e85c8b59ecabdb3b245293712fcfac79",
+            "shapes-1.2.0-sources.jar" to "014405aac8faf374a9ee2fcd27aec7540a15562de3a1cc90c7835b6cca728738",
+        )
+        pinnedGlassGeometrySources.files.forEach { source ->
+            val hash = MessageDigest.getInstance("SHA-256").digest(source.readBytes())
+                .joinToString("") { "%02x".format(it) }
+            check(hash == hashes[source.name]) { "Pinned glass geometry source hash mismatch: ${source.name}" }
+        }
+    }
 }
 
 kotlin {
@@ -17,6 +50,7 @@ kotlin {
 
     sourceSets {
         val desktopMain by getting {
+            kotlin.srcDir(extractPinnedGlassGeometry)
             resources.srcDir("src/main/resources")
             dependencies {
                 implementation(project(":shared"))
@@ -24,6 +58,8 @@ kotlin {
                 implementation(libs.kotlinx.coroutines.swing)
                 implementation(libs.okhttp)
                 implementation(libs.org.json)
+                // Same JNA already shipped by shared; native input verification uses its Win32 ABI.
+                implementation("net.java.dev.jna:jna-platform:5.17.0")
                 implementation(compose.ui)
                 implementation(compose.runtime)
                 implementation(compose.material3)
@@ -43,6 +79,7 @@ compose.desktop {
             description = "MeloX Music Player for Linux"
             vendor = "MeloX"
             modules(
+                "java.desktop",
                 "java.instrument",
                 "java.management",
                 "java.prefs",
@@ -125,6 +162,19 @@ tasks.register<JavaExec>("auditArtworkDecode") {
     args(layout.buildDirectory.file("verification/artwork-decode.json").get().asFile.absolutePath)
 }
 
+tasks.register<JavaExec>("auditFlowingLight") {
+    group = "verification"
+    description = "Verify actual production Flowing Light motion, freeze/resume, wrap and native disposal."
+    dependsOn("desktopMainClasses")
+    val compilation = kotlin.targets.getByName("desktop").compilations.getByName("main")
+    classpath = files(compilation.output.allOutputs, compilation.runtimeDependencyFiles)
+    mainClass.set("melox.validation.MeloXFlowingLightAuditKt")
+    jvmArgs(productionJvmArgs)
+    systemProperty("java.awt.headless", "true")
+    systemProperty("user.home", layout.buildDirectory.dir("verification/flowing-light-home").get().asFile.absolutePath)
+    args(layout.buildDirectory.dir("verification/flowing-light").get().asFile.absolutePath)
+}
+
 tasks.register<JavaExec>("auditSettingsIcons") {
     group = "verification"
     description = "Check every pinned settings row icon against the pinned Android SF Symbol mapping."
@@ -145,4 +195,47 @@ tasks.register<JavaExec>("auditDisplayAwake") {
     classpath = files(compilation.output.allOutputs, compilation.runtimeDependencyFiles)
     mainClass.set("melox.validation.MeloXDisplayAwakeAuditKt")
     args(layout.buildDirectory.file("verification/display-awake.json").get().asFile.absolutePath)
+}
+
+tasks.register<JavaExec>("auditImmersiveWindow") {
+    group = "verification"
+    description = "Verify native fullscreen and restoration of floating/maximized/user-controlled placement."
+    dependsOn("desktopMainClasses")
+    val compilation = kotlin.targets.getByName("desktop").compilations.getByName("main")
+    classpath = files(compilation.output.allOutputs, compilation.runtimeDependencyFiles)
+    mainClass.set("melox.validation.MeloXImmersiveWindowAuditKt")
+    args(layout.buildDirectory.file("verification/immersive-window.json").get().asFile.absolutePath)
+}
+
+tasks.register<JavaExec>("auditNativeTouchScroll") {
+    group = "verification"
+    description = "Inject Windows touch contacts through AWT into the production scrolling adapter."
+    dependsOn("desktopMainClasses")
+    val compilation = kotlin.targets.getByName("desktop").compilations.getByName("main")
+    classpath = files(compilation.output.allOutputs, compilation.runtimeDependencyFiles)
+    mainClass.set("melox.validation.MeloXNativeTouchScrollAuditKt")
+    args(layout.buildDirectory.file("verification/native-touch-scroll.json").get().asFile.absolutePath)
+}
+
+tasks.register<JavaExec>("auditWindowChrome") {
+    group = "verification"
+    description = "Replay the production app-owned window caption with native Robot pointer input."
+    dependsOn("desktopMainClasses")
+    val compilation = kotlin.targets.getByName("desktop").compilations.getByName("main")
+    classpath = files(compilation.output.allOutputs, compilation.runtimeDependencyFiles)
+    mainClass.set("melox.validation.MeloXWindowChromeAuditKt")
+    args(layout.buildDirectory.file("verification/window-chrome.json").get().asFile.absolutePath)
+}
+
+tasks.register<JavaExec>("auditGlassOptics") {
+    group = "verification"
+    description = "Verify real Skia glass optics pixels, stable filter reuse and native ownership."
+    dependsOn("desktopMainClasses")
+    val compilation = kotlin.targets.getByName("desktop").compilations.getByName("main")
+    classpath = files(compilation.output.allOutputs, compilation.runtimeDependencyFiles)
+    mainClass.set("melox.validation.MeloXGlassOpticsAuditKt")
+    jvmArgs(productionJvmArgs)
+    systemProperty("java.awt.headless", "true")
+    systemProperty("user.home", layout.buildDirectory.dir("verification/glass-home").get().asFile.absolutePath)
+    args(layout.buildDirectory.file("verification/glass-optics.json").get().asFile.absolutePath)
 }

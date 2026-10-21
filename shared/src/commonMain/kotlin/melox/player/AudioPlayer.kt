@@ -44,6 +44,8 @@ object AudioPlayer {
     private var currentLine: SourceDataLine? = null
     private var currentProcess: Process? = null
     @Volatile private var volumeLinear: Float = 1f
+    private val _volumeLevel = MutableStateFlow(1f)
+    val volumeLevel: StateFlow<Float> = _volumeLevel.asStateFlow()
     private val playbackLock = Any()
     private val paused = AtomicBoolean(false)
     private val pauseVersion = AtomicLong()
@@ -76,6 +78,9 @@ object AudioPlayer {
     var decoderCommand: List<String> = emptyList() // Bundled extraction belongs to startDecoder's IO worker.
 
     internal val playbackOffsetMs = AtomicLong(0L)
+
+    /** Heard-frame accounting with a wall-clock fallback for broken device counters. */
+    private val playedFrames = MeloXPlayedFramesClock { paused.get() }
 
     /** Publish the selected item before URL resolution; never leave old audio running. */
     fun selectTrack(track: MusicTrack, startPositionMs: Long = 0L, knownDurationMs: Long = 0L, loading: Boolean = true) {
@@ -226,6 +231,7 @@ object AudioPlayer {
             val (launched, launchedRevision) = synchronized(playbackLock) {
                 if (session.get() !== request) return
                 writtenFrames.set(0L)
+                playedFrames.reset()
                 val startAt = pendingSeekMs.get().coerceAtLeast(0L)
                 playbackOffsetMs.set(startAt)
                 ready.set(false)
@@ -436,7 +442,9 @@ object AudioPlayer {
                 synchronized(playbackLock) {
                     if (session.get() !== request || !ready.get()) return@launch
                     val written = writtenFrames.get()
-                    val buffered = currentLine?.let { unplayedFrames(it, written) } ?: 0L
+                    val devicePlayed = currentLine?.let { runCatching { it.longFramePosition }.getOrNull() }
+                    val played = playedFrames.observe(devicePlayed, written)
+                    val buffered = (written - played).coerceAtLeast(0L)
                     val position = displayedPosition(pendingSeekMs.get(), playbackOffsetMs.get(), written, buffered)
                     val duration = _durationMs.value
                     _positionMs.value = position
@@ -448,6 +456,7 @@ object AudioPlayer {
 
     fun setVolume(volume: Float) {
         volumeLinear = volume.coerceIn(0f, 1f)
+        _volumeLevel.value = volumeLinear
         dualSession.get()?.volume = volumeLinear
     }
 

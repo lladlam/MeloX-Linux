@@ -6,11 +6,13 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
+import melox.ui.glass.MeloXShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -63,14 +65,19 @@ fun MeloXBottomChrome(
     hasMedia: Boolean,
     minimized: Boolean,
     visibleRootTabs: List<AppTab>,
+    split: Boolean = false,
     modifier: Modifier = Modifier,
     onSelect: (AppTab) -> Unit,
-    miniPlayer: @Composable (RowScope.(compactProgress: Float) -> Unit),
+    miniPlayer: @Composable (compactProgress: Float) -> Unit,
 ) {
     val dockScope = rememberCoroutineScope()
+    val navigationPosition = melox.settings.MeloXSettingsRuntime.splitNavigationPosition
+    val miniPosition = melox.settings.MeloXSettingsRuntime.splitMiniPlayerPosition
+    val coupled = melox.settings.meloXChromeScrollCoupled(split, navigationPosition, miniPosition)
+    val inlineMini = !split || (coupled && !navigationPosition.isSideRail)
 
     val rawProgress by animateFloatAsState(
-        targetValue = if (minimized) 1f else 0f,
+        targetValue = if (minimized && coupled) 1f else 0f,
         animationSpec = if (minimized) MeloXMotion.tabCollapseSpec() else MeloXMotion.tabExpandSpec(),
         label = "melox-tab-minimize-progress",
     )
@@ -83,7 +90,7 @@ fun MeloXBottomChrome(
     val navHeight = lerpDp(MeloXChromeTokens.ExpandedSize, MeloXChromeTokens.CompactSize, bounceFrac)
     val searchSize = lerpDp(MeloXChromeTokens.ExpandedSize, MeloXChromeTokens.CompactSize, bounceFrac.coerceAtLeast(0f))
     val mediaReveal by animateFloatAsState(
-        targetValue = if (hasMedia) 1f else 0f,
+        targetValue = if (hasMedia && inlineMini) 1f else 0f,
         animationSpec = MeloXMotion.mediaRevealSpec(),
         label = "melox-mini-player-reveal",
     )
@@ -93,8 +100,18 @@ fun MeloXBottomChrome(
     val expandedLayerAlpha = 1f - smoothStep(progress, 0.43f, 0.72f)
     val compactLayerAlpha = smoothStep(progress, 0.52f, 0.82f)
 
+    melox.ui.layout.MeloXPositionedChrome(split = split, hasMedia = hasMedia && !inlineMini,
+        coupledProgress = if (coupled) progress else 0f, navigationPosition = navigationPosition, miniPlayerPosition = miniPosition,
+        modifier = modifier, miniPlayer = {
+            Box(Modifier.fillMaxWidth().padding(horizontal = if (miniPosition.isSideRail) 4.dp else 12.dp, vertical = 8.dp)) {
+                miniPlayer(if (coupled) progress else 0f)
+            }
+        }) {
+    if (split && navigationPosition.isSideRail) {
+        MeloXVerticalNavigation(selectedTab, visibleRootTabs, onSelect, if (coupled) progress else 0f, hasMedia && coupled)
+    } else {
     Column(
-        modifier = modifier
+        modifier = Modifier
             .testTag("bottom-root-tabs").semantics { stateDescription = visibleRootTabs.joinToString(">") { it.name } }
             .fillMaxWidth()
             // Mei keeps the navigation capsule 8dp above the bottom edge.
@@ -113,7 +130,7 @@ fun MeloXBottomChrome(
             val expandedNavWidth = maxWidth - horizontalMargin * 2 - expandedGap - MeloXChromeTokens.ExpandedSize
             val navWidth = lerpDp(expandedNavWidth, compactSize, bounceFrac).coerceAtLeast(1.dp)
             val navOffsetX = horizontalMargin - (navWidth - expandedNavWidth).coerceAtLeast(0.dp) * MeloXChromeTokens.NavExpandLeftShare
-            val navShape = RoundedCornerShape(50)
+            val navShape = MeloXShapes.capsule
             val primaryTabs = visibleRootTabs
 
             val desiredCompactMiniVisibleWidth =
@@ -126,7 +143,7 @@ fun MeloXBottomChrome(
             val miniLift = lerpDp(66.dp, 0.dp, bounceFrac) * mediaReveal
             val miniCenterAlignNudge = lerpDp(0.dp, 1.dp, bounceFrac) * mediaReveal
 
-            if (hasMedia) {
+            if (hasMedia && inlineMini) {
                 Row(
                     modifier = Modifier
                         .align(Alignment.BottomStart)
@@ -250,6 +267,7 @@ fun MeloXBottomChrome(
                                     selected = frostedGlass && selectedTab == tab,
                                     labelAlpha = labelAlpha,
                                     interactive = dockExpanded,
+                                    modifier = Modifier.testTag("root-tab:${tab.name}"),
                                     onClick = { onSelect(tab) },
                                 )
                             }
@@ -280,7 +298,7 @@ fun MeloXBottomChrome(
                             .height(dropletHeight)
                             .clearAndSetSemantics { }
                             .meloXRecordBackdrop(tabsBackdrop, visible = false)
-                            .meloXLiquidCaptureLayer(navShape, bottomGlassSurfaceColor())
+                             .meloXLiquidCaptureLayer(navShape, bottomGlassSurfaceColor(), dampedDock.pressProgress)
                             .padding(horizontal = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -317,7 +335,7 @@ fun MeloXBottomChrome(
                                 )
                             }
                             .meloXLiquidTabSelection(
-                                shape = RoundedCornerShape(50),
+                                 shape = MeloXShapes.capsule,
                                  selected = lensVisibility > 0.001f,
                                  panelBackdrop = tabsBackdrop,
                                 pressProgress = dampedDock.pressProgress,
@@ -338,7 +356,7 @@ fun MeloXBottomChrome(
                     .offset(x = -horizontalMargin)
                     .size(searchSize)
                     .meloXLiquidBottomBar(
-                        shape = RoundedCornerShape(50),
+                        shape = MeloXShapes.capsule,
                         tint = bottomLiquidGlassTint(),
                         refractionHeight = lerpDp(10.dp, 8.dp, bounceFrac),
                         surfaceColor = bottomGlassSurfaceColor(),
@@ -358,6 +376,30 @@ fun MeloXBottomChrome(
             }
         }
     }
+    }
+    }
+}
+
+@Composable
+private fun MeloXVerticalNavigation(selectedTab: AppTab, tabs: List<AppTab>, onSelect: (AppTab) -> Unit,
+    compactProgress: Float, reserveMiniSlot: Boolean) {
+    Box(Modifier.fillMaxWidth().testTag("bottom-root-tabs").semantics { stateDescription = tabs.joinToString(">") { it.name } }
+        .padding(horizontal = 4.dp, vertical = 8.dp)) {
+        Column(Modifier.fillMaxWidth().meloXLiquidBottomBar(shape = MeloXShapes.capsule,
+            tint = bottomLiquidGlassTint(), surfaceColor = bottomGlassSurfaceColor())
+            .verticalScroll(rememberScrollState()).padding(vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            (if (compactProgress > .5f) listOf(if (selectedTab == AppTab.Search) tabs.firstOrNull() ?: AppTab.Settings else selectedTab,
+                AppTab.Search) else tabs + AppTab.Search).distinct().forEach { tab ->
+                if (tab == AppTab.Search && compactProgress > .5f && reserveMiniSlot) Spacer(Modifier.height(56.dp))
+                val color = if (tab == selectedTab) MeloXSystemColors.Red else MaterialTheme.colorScheme.onSurface
+                Column(Modifier.fillMaxWidth().height(56.dp).testTag("root-tab:${tab.name}")
+                    .clickable { onSelect(tab) }, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                    MeloXSymbolIcon(tab.toSymbol(), size = 24, color = color)
+                    Text(tab.label, fontSize = 10.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, color = color)
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -368,6 +410,7 @@ private fun RowScope.RootTabButton(
     labelAlpha: Float,
     interactive: Boolean = true,
     scale: Float = 1f,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
     val foreground by animateColorAsState(
@@ -380,7 +423,7 @@ private fun RowScope.RootTabButton(
         label = "melox-tab-foreground",
     )
     Column(
-        modifier = Modifier
+        modifier = modifier
             .weight(1f)
             .fillMaxHeight()
             .graphicsLayer { scaleX = scale; scaleY = scale }

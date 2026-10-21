@@ -35,6 +35,10 @@ fi
 chmod +x "$APPDIR/AppRun"
 
 TOOL="${APPIMAGETOOL:-}"
+if [[ -n "$TOOL" && ! -x "$TOOL" ]]; then
+  echo "APPIMAGETOOL not executable, falling back: $TOOL" >&2
+  TOOL=""
+fi
 if [[ -z "$TOOL" ]] && command -v appimagetool >/dev/null 2>&1; then
   TOOL="$(command -v appimagetool)"
 fi

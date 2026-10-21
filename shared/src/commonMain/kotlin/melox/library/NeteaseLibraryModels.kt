@@ -18,6 +18,8 @@ data class NeteasePlaylistSummary(
      * the single renderer for NetEase, QQ Music and Kugou.
      */
     val providerPlaylist: MusicPlaylistSummary? = null,
+    val subscribed: Boolean? = null,
+    val copywriter: String? = null,
 )
 
 data class NeteasePlaylistDetail(

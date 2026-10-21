@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -85,6 +86,7 @@ import melox.music.provider.PlaylistCapability
 import melox.music.provider.UserLibraryCapability
 import melox.playback.PlaybackCommands
 import melox.settings.MeloXContentLayout
+import melox.settings.MeloXSettingsRuntime
 import melox.ui.foundation.MeloXMotion
 import melox.ui.foundation.MeloXSymbolIcon
 import melox.ui.foundation.MeloXIosTopBar
@@ -111,7 +113,12 @@ internal val MeloXBottomContentClearanceDp = 156.dp
 @Composable
 fun LibraryScreen(
     navState: MeloXNavState? = null,
+    requestedPage: String? = null,
 ) {
+    if (MeloXSettingsRuntime.desktopLayoutEnabled && MusicProviderSelectionStore.selectedSource() == MusicSource.Netease) {
+        melox.ui.desktop.MeloXDesktopLibrary(requestedPage) { navState?.navigateTo(melox.ui.navigation.Route.Login) }
+        return
+    }
     val scope = rememberCoroutineScope()
     val session = melox.account.rememberNeteaseSessionStore()
     val source = MusicProviderSelectionStore.selectedSource()
@@ -128,6 +135,9 @@ fun LibraryScreen(
 
     val initialPage = MeloXLibraryPage.valueOf(MeloXContentLayout.initialLibraryPage(source))
     var selectedPage by rememberSaveable(source) { mutableStateOf(initialPage) }
+    LaunchedEffect(source, requestedPage) {
+        MeloXLibraryPage.entries.firstOrNull { it.name == requestedPage && it.isEnabled(source) }?.let { selectedPage = it }
+    }
     var selectedPlaylist by remember(source, session.cookie, accountRevision) { mutableStateOf<NeteasePlaylistSummary?>(null) }
     var snapshot by remember(source, session.cookie, accountRevision) { mutableStateOf<NeteaseLibrarySnapshot?>(null) }
     var providerAccount by remember(source, accountRevision) { mutableStateOf<MusicAccountSummary?>(null) }
@@ -170,6 +180,9 @@ fun LibraryScreen(
         } else if (source == MusicSource.Local) {
             runCatching {
                 withContext(Dispatchers.IO) {
+                    // Desktop has no MediaStore. Rescan the configured music dirs so the
+                    // library reflects files added since the last run.
+                    melox.provider.local.LocalMediaScanner().scanAll()
                     val tracks = (provider as? LocalAggregationCapability)
                         ?.aggregationTracks(page = 1, pageSize = 200)
                         ?.items
@@ -273,11 +286,44 @@ fun LibraryScreen(
         return
     }
 
+    if (MeloXSettingsRuntime.desktopLayoutEnabled && source != MusicSource.Netease) {
+        if (selectedPlaylist != null) {
+            PlaylistDetailScreen(requireNotNull(selectedPlaylist), onBack = { selectedPlaylist = null })
+        } else if (source == MusicSource.Local) {
+            melox.ui.desktop.DesktopLibrarySongs(
+                titleKey = "ui.navigation.library",
+                songs = snapshot?.likedSongs.orEmpty(),
+                loading = loading,
+                error = errorMessage,
+                onRetry = { scope.launch { refreshLibrary() } },
+                onLogin = if (providerAccount == null) ({ navState?.navigateTo(melox.ui.navigation.Route.Login) }) else null,
+                tag = "desktop-provider-library:Local",
+            )
+        } else {
+            melox.ui.desktop.MeloXDesktopProviderLibrary(
+                source = source,
+                playlists = snapshot?.playlists.orEmpty(),
+                loading = loading,
+                error = errorMessage,
+                accountName = providerAccount?.displayName,
+                onLogin = { navState?.navigateTo(melox.ui.navigation.Route.Login) },
+                onRetry = { scope.launch { refreshLibrary() } },
+                onOpen = { selectedPlaylist = it },
+            )
+        }
+        return
+    }
+
+    val splitPlaylistDetail = !MeloXSettingsRuntime.desktopLayoutEnabled &&
+        melox.ui.layout.LocalMeloXListDetail.current && !melox.ui.layout.LocalMeloXInDetailPane.current
+    var retainedPlaylist by remember(source) { mutableStateOf(selectedPlaylist) }
+    androidx.compose.runtime.SideEffect { if (selectedPlaylist != null) retainedPlaylist = selectedPlaylist }
+    melox.ui.navigation.MeloXBackHandler(selectedPlaylist != null) { selectedPlaylist = null }
     SharedTransitionLayout(modifier = Modifier.fillMaxSize()) {
         val sharedScope = this
 
         AnimatedContent(
-            targetState = selectedPlaylist,
+            targetState = selectedPlaylist.takeUnless { splitPlaylistDetail },
             modifier = Modifier.fillMaxSize(),
             transitionSpec = {
                 val openingDetail = targetState != null
@@ -305,6 +351,11 @@ fun LibraryScreen(
         ) { targetPlaylist ->
             val playlistTransitionVisibilityScope = this
             if (targetPlaylist != null) {
+                if (MeloXSettingsRuntime.desktopLayoutEnabled) {
+                    // Library must use the same Mac collection surface as Home/Search.
+                    // The shared-element mobile detail below belongs to the mobile layout only.
+                    PlaylistDetailScreen(targetPlaylist, onBack = { selectedPlaylist = null })
+                } else {
                 MeloXLibraryPlaylistDetailScreen(
                     initialPlaylist = targetPlaylist,
                     client = client,
@@ -320,22 +371,34 @@ fun LibraryScreen(
                         }
                     },
                 )
+                }
             } else {
+                val desktop = MeloXSettingsRuntime.desktopLayoutEnabled
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(MeloXColors.pageBackground())
-                        .statusBarsPadding(),
+                        .then(if (desktop) Modifier else Modifier.statusBarsPadding()),
                 ) {
-                    MeloXIosTopBar(
-                        title = "音乐库",
-                    )
+                    if (desktop) {
+                        Text(
+                            text = "音乐库",
+                            modifier = Modifier.padding(start = 34.dp, end = 34.dp, top = 28.dp, bottom = 12.dp),
+                            fontSize = 32.sp,
+                            lineHeight = 38.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    } else {
+                        MeloXIosTopBar(title = "音乐库")
+                    }
 
                     MeloXLibrarySegmentedPicker(
                         selected = selectedPage,
                         onSelected = { selectedPage = it },
                         source = source,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                        modifier = Modifier
+                            .padding(horizontal = if (desktop) 34.dp else 16.dp, vertical = 12.dp)
+                            .then(if (desktop) Modifier.widthIn(max = 520.dp) else Modifier),
                     )
 
                     if (errorMessage != null && snapshot == null) {
@@ -447,6 +510,29 @@ fun LibraryScreen(
 
                             MeloXLibraryPage.Downloads -> MeloXLibraryDownloadsPage()
                         }
+                    }
+                }
+            }
+        }
+    }
+    melox.ui.layout.MeloXAdaptiveDetail(splitPlaylistDetail && selectedPlaylist != null, onDismiss = { selectedPlaylist = null }) { shown ->
+        androidx.compose.animation.AnimatedVisibility(visible = shown,
+            modifier = Modifier.fillMaxSize().testTag("library-split-playlist-detail"),
+            enter = fadeIn(MeloXMotion.contentEnterTween()), exit = fadeOut(MeloXMotion.contentExitTween())) {
+            val detailPlaylist = selectedPlaylist ?: retainedPlaylist
+            if (detailPlaylist != null) androidx.compose.runtime.key(detailPlaylist.id, detailPlaylist.providerPlaylist?.id) {
+                SharedTransitionLayout(Modifier.fillMaxSize()) {
+                    val detailSharedScope = this
+                    androidx.compose.animation.AnimatedVisibility(visible = true) {
+                        MeloXLibraryPlaylistDetailScreen(detailPlaylist, client, onBack = { selectedPlaylist = null },
+                            sharedTransitionScope = detailSharedScope, animatedVisibilityScope = this,
+                            onSongLikeChanged = { song, liked ->
+                                snapshot?.let { current ->
+                                    val updated = current.withSongLiked(song, liked)
+                                    snapshot = updated
+                                    session.profile?.userId?.let { userId -> scope.launch { cache.saveSnapshot(userId, updated) } }
+                                }
+                            })
                     }
                 }
             }
@@ -635,6 +721,7 @@ private fun MeloXLibrarySegmentedPicker(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
+                        .testTag("library-page:${page.name}")
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null,
@@ -660,6 +747,7 @@ private fun MeloXLibrarySongsPage(
     onPlayAll: () -> Unit,
     onHeartMode: (() -> Unit)? = null,
 ) {
+    val desktop = MeloXSettingsRuntime.desktopLayoutEnabled
     if (songs.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(
@@ -673,7 +761,11 @@ private fun MeloXLibrarySongsPage(
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(bottom = MeloXBottomContentClearanceDp),
+        contentPadding = PaddingValues(
+            start = if (desktop) 34.dp else 0.dp,
+            end = if (desktop) 34.dp else 0.dp,
+            bottom = if (desktop) 104.dp else MeloXBottomContentClearanceDp,
+        ),
     ) {
         item {
             MeloXPlayAllRow(onPlayAll)
@@ -706,10 +798,11 @@ private fun MeloXLibrarySongsPage(
 
 @Composable
 private fun MeloXPlayAllRow(onClick: () -> Unit) {
+    val desktop = MeloXSettingsRuntime.desktopLayoutEnabled
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(58.dp)
+            .height(if (desktop) 48.dp else 58.dp)
             .clickable(onClick = onClick)
             .padding(start = 20.dp, end = 18.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -721,7 +814,7 @@ private fun MeloXPlayAllRow(onClick: () -> Unit) {
         )
         Text(
             text = "播放全部",
-            fontSize = 17.sp,
+            fontSize = if (desktop) 14.sp else 17.sp,
             fontWeight = FontWeight.Normal,
             color = MeloXColors.pageOnBackground(),
         )
@@ -733,10 +826,11 @@ private fun MeloXLibraryTrackRow(
     song: SearchSong,
     onClick: () -> Unit,
 ) {
+    val desktop = MeloXSettingsRuntime.desktopLayoutEnabled
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(66.dp)
+            .height(if (desktop) 54.dp else 66.dp)
             .clickable(onClick = onClick)
             .padding(start = 18.dp, end = 18.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -746,7 +840,7 @@ private fun MeloXLibraryTrackRow(
             url = song.artworkUrl,
             fallbackColor = MeloXColors.Surface,
             modifier = Modifier
-                .size(44.dp)
+                .size(if (desktop) 40.dp else 44.dp)
                 .clip(RoundedCornerShape(6.dp)),
         )
         Column(
@@ -755,8 +849,8 @@ private fun MeloXLibraryTrackRow(
         ) {
             Text(
                 text = song.name,
-                fontSize = 17.sp,
-                lineHeight = 21.sp,
+                fontSize = if (desktop) 14.sp else 17.sp,
+                lineHeight = if (desktop) 18.sp else 21.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 color = MeloXColors.pageOnBackground(),
@@ -789,6 +883,7 @@ private fun MeloXLibraryPlaylistsPage(
     sharedTransitionScope: SharedTransitionScope,
     animatedVisibilityScope: AnimatedVisibilityScope,
 ) {
+    val desktop = MeloXSettingsRuntime.desktopLayoutEnabled
     if (playlists.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(
@@ -803,7 +898,11 @@ private fun MeloXLibraryPlaylistsPage(
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(bottom = MeloXBottomContentClearanceDp),
+        contentPadding = PaddingValues(
+            start = if (desktop) 34.dp else 0.dp,
+            end = if (desktop) 34.dp else 0.dp,
+            bottom = if (desktop) 104.dp else MeloXBottomContentClearanceDp,
+        ),
     ) {
         item {
             Text(
@@ -817,7 +916,8 @@ private fun MeloXLibraryPlaylistsPage(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(66.dp)
+                    .height(if (desktop) 54.dp else 66.dp)
+                    .testTag("library-playlist:${playlist.id}")
                     .clickable { onPlaylistClick(playlist) }
                     .padding(start = 18.dp, end = 18.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -842,7 +942,7 @@ private fun MeloXLibraryPlaylistsPage(
                     url = playlist.coverUrl,
                     fallbackColor = MeloXColors.Surface,
                     modifier = sharedArtworkModifier
-                        .size(44.dp)
+                        .size(if (desktop) 40.dp else 44.dp)
                         .clip(RoundedCornerShape(6.dp)),
                 )
                 Column(
@@ -851,7 +951,7 @@ private fun MeloXLibraryPlaylistsPage(
                 ) {
                     Text(
                         playlist.name,
-                        fontSize = 17.sp,
+                        fontSize = if (desktop) 14.sp else 17.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -861,10 +961,10 @@ private fun MeloXLibraryPlaylistsPage(
                         color = MeloXColors.pageOnBackground().copy(alpha = 0.48f),
                     )
                 }
-                MeloXActionIcon(
-                    "›",
-                    Modifier.size(18.dp),
-                    MeloXColors.pageOnBackground().copy(alpha = 0.40f),
+                MeloXSymbolIcon(
+                    melox.ui.foundation.MeloXSymbol.ChevronRight,
+                    size = 15,
+                    color = MeloXColors.pageOnBackground().copy(alpha = 0.40f),
                 )
             }
             MeloXInsetDivider(leading = 84.dp)

@@ -6,6 +6,7 @@ import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerButton
 import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
@@ -52,6 +53,7 @@ fun main(args: Array<String>) = runBlocking {
     val frameOffsets = option("--frames-ms", "").split(',').filter { it.isNotBlank() }.map { it.toLong() }
     require(frameOffsets.all { it >= 0 } && frameOffsets == frameOffsets.distinct().sorted())
     val frameEvidence = JSONArray()
+    val inputEvidence = JSONArray()
     val sceneEvidence = JSONArray()
     val expectations = if (option("--expect-file", "").isNotBlank()) {
         File(option("--expect-file", "")).readLines(Charsets.UTF_8).filter(String::isNotBlank).associate { entry ->
@@ -109,6 +111,9 @@ fun main(args: Array<String>) = runBlocking {
         option("--artist-id", "").takeIf(String::isNotBlank)?.toLong()?.let {
             melox.ui.navigation.MeloXCollectionLaunchBus.open(melox.ui.navigation.MeloXCollectionTarget.Artist(it))
         }
+        option("--album-id", "").takeIf(String::isNotBlank)?.toLong()?.let {
+            melox.ui.navigation.MeloXCollectionLaunchBus.open(melox.ui.navigation.MeloXCollectionTarget.Album(it))
+        }
         val playId = option("--play-id", "").takeIf(String::isNotBlank)?.toLong()
         option("--local-wavs", "").takeIf(String::isNotBlank)?.let { paths ->
             val tracks = paths.split(',').map { path ->
@@ -123,7 +128,9 @@ fun main(args: Array<String>) = runBlocking {
             }
             melox.playback.MeloXPlaybackModePreferences.setAutoMix("--automix" in args)
             melox.playback.MeloXPlaybackModePreferences.setAutoMixString("automix_mode", "Fixed")
-            melox.music.provider.MusicProviderSelectionStore.setSelectedSource(melox.music.model.MusicSource.Local)
+            // Browsing source and playing track source are independent in the app.
+            melox.music.provider.MusicProviderSelectionStore.setSelectedSource(
+                melox.music.model.MusicSource.valueOf(option("--source", "Local")))
             melox.playback.ProviderPlaybackCommands.playQueue(tracks, tracks.first().id)
         }
         if (playQuery.isNotBlank() || playId != null) {
@@ -151,6 +158,8 @@ fun main(args: Array<String>) = runBlocking {
                 frames += 1
             } while (frames < 3 || System.nanoTime() < end)
         }
+        data class PlaybackCheckpoint(val track: melox.music.model.MusicResourceId, val position: Long, val outputCount: Int)
+        val playbackCheckpoints = mutableMapOf<String, PlaybackCheckpoint>()
         fun assertionMatches(assertion: String): Boolean {
             val (kind, expected) = assertion.split(':', limit = 2)
             val semantics = scene.captureSemantics()
@@ -169,6 +178,22 @@ fun main(args: Array<String>) = runBlocking {
                 "disabled" -> semantics.tagged(expected)?.config?.contains(SemanticsProperties.Disabled) == true
                 "enabled" -> semantics.tagged(expected)?.config?.contains(SemanticsProperties.Disabled) == false
                 "full-tag" -> semantics.tagged(expected)?.boundsInWindow?.let { it.width >= width * .97f && it.height >= height * .97f } == true
+                "in-half" -> expected.split(':', limit = 2).let { (tag, half) ->
+                    semantics.tagged(tag)?.boundsInWindow?.let { bounds ->
+                        !bounds.isEmpty && if (half == "right") bounds.left >= width / 2f - 1f else bounds.right <= width / 2f + 1f
+                    } == true
+                }
+                "chrome-placement" -> expected.split(':', limit = 2).let { (tag, name) ->
+                    val position = melox.settings.MeloXSplitChromePosition.valueOf(name)
+                    semantics.tagged(tag)?.boundsInWindow?.let { bounds ->
+                        !bounds.isEmpty && (if (position.right) bounds.left >= width / 2f else bounds.right <= width / 2f) &&
+                            when (position.vertical) {
+                                -1 -> bounds.top < 24f * density
+                                0 -> kotlin.math.abs(bounds.center.y - height / 2f) < 80f * density
+                                else -> bounds.bottom > height - 24f * density
+                            }
+                    } == true
+                }
                 "absent" -> semantics.tagged(expected) == null
                 "selected" -> semantics.tagged(expected)?.config?.getOrNull(SemanticsProperties.Selected) == true
                 "unselected" -> semantics.tagged(expected)?.config?.getOrNull(SemanticsProperties.Selected) == false
@@ -183,6 +208,9 @@ fun main(args: Array<String>) = runBlocking {
                 "eq-preset" -> melox.playback.MeloXEqualizerSettings.current.value.preset == expected
                 "automix-mode" -> melox.playback.MeloXAutoMixSettings.read().mode.name == expected
                 "automix-duration-ms" -> melox.playback.MeloXAutoMixSettings.read().fixedDurationMs == expected.toLong()
+                "smart-queue-analysis-limit" -> melox.playback.MeloXAutoMixSettings.read().smartQueueAnalysisLimit == expected.toInt()
+                "lyric-language" -> melox.settings.MeloXSettingsRuntime.lyricLanguage == expected
+                "lyric-preference" -> melox.lyrics.requestedLyricPreference().cacheKey() == expected
                 "download-lyrics" -> melox.platform.getPreferences("melox_downloads").getBoolean("download_lyrics", true) == expected.toBooleanStrict()
                 "player-shell" -> melox.settings.MeloXSettingsRuntime.playerShell.name == expected
                 "pv-style" -> melox.settings.MeloXSettingsRuntime.textPVStyle.name == expected
@@ -204,6 +232,19 @@ fun main(args: Array<String>) = runBlocking {
                 "queue-min" -> melox.playback.PlaybackCommands.queue.value.songs.size >= expected.toInt()
                 "tag-prefix" -> semantics.any { it.config.getOrNull(SemanticsProperties.TestTag)?.startsWith(expected) == true && !it.boundsInWindow.isEmpty }
                 "position-min" -> melox.player.AudioPlayer.positionMs.value >= expected.toLong()
+                "volume" -> kotlin.math.abs(melox.player.AudioPlayer.volumeLevel.value - expected.toFloat()) < .025f
+                "playback-checkpoint" -> melox.player.AudioPlayer.currentTrack.value?.id?.let { id ->
+                    if (pcmOutput == null || !melox.player.AudioPlayer.state.value.isPlaying) false else {
+                        playbackCheckpoints[expected] = PlaybackCheckpoint(id, melox.player.AudioPlayer.positionMs.value, pcmOutput.evidence().size)
+                        true
+                    }
+                } ?: false
+                "playback-continuity" -> playbackCheckpoints[expected]?.let { checkpoint ->
+                    melox.player.AudioPlayer.currentTrack.value?.id == checkpoint.track &&
+                        melox.player.AudioPlayer.state.value.isPlaying &&
+                        melox.player.AudioPlayer.positionMs.value >= checkpoint.position &&
+                        pcmOutput?.evidence()?.size == checkpoint.outputCount
+                } == true
                 "no-playback-error" -> (melox.player.AudioPlayer.state.value.error == null) == expected.toBooleanStrict()
                 "repeat" -> melox.playback.PlaybackCommands.playerController()?.repeatMode?.value == expected.toInt()
                 "seek-line" -> semantics.tagged("lyric-line-$expected")?.config?.getOrNull(melox.ui.screens.MeloXLyricTimeMsKey)?.let {
@@ -217,6 +258,10 @@ fun main(args: Array<String>) = runBlocking {
                 "ui-font" -> (melox.ui.theme.MeloXMaterialTypography.bodyLarge.fontFamily == androidx.compose.ui.text.font.FontFamily.Default) == (expected == "system")
                 "local-playlist-size" -> melox.provider.local.LocalMusicRepository().playlists()
                     .firstOrNull { it.name == expected.substringBeforeLast(':') }?.trackKeys?.size == expected.substringAfterLast(':').toInt()
+                "local-favorite" -> melox.player.AudioPlayer.currentTrack.value?.let { track ->
+                    track.id.source == melox.music.model.MusicSource.Local &&
+                        melox.provider.local.LocalMusicRepository().track(track.id.value)?.isFavorite == expected.toBooleanStrict()
+                } == true
                 "title" -> melox.player.AudioPlayer.currentTrack.value?.title == expected
                 "track" -> melox.player.AudioPlayer.currentTrack.value?.id?.let { "${it.source.storageValue}:${it.value}" } == expected
                 "error-kind" -> melox.player.AudioPlayer.state.value.errorKind?.name == expected
@@ -231,8 +276,8 @@ fun main(args: Array<String>) = runBlocking {
                 else -> error("Unknown capture assertion $kind")
             }
         }
-        suspend fun awaitUi(condition: () -> Boolean) {
-            val deadline = System.nanoTime() + 5_000_000_000L
+        suspend fun awaitUi(timeoutMs: Long = 5_000L, condition: () -> Boolean) {
+            val deadline = System.nanoTime() + timeoutMs * 1_000_000L
             while (!condition() && System.nanoTime() < deadline) settle(16)
         }
         fun capture(name: String) {
@@ -256,6 +301,7 @@ fun main(args: Array<String>) = runBlocking {
                     JSONObject().put("entries", it.entries).put("budgeted_bytes", it.retainedWeight).put("budget_bytes", it.maxWeight)
                 })
                 .put("captured_elapsed_ms", (System.nanoTime() - start) / 1_000_000.0)
+                .put("pointer_mode", if (melox.ui.navigation.MeloXPointerMode.touch) "Touch" else "Mouse")
                 .put("page", page ?: JSONObject.NULL)
                 .put("controls_visible", semantics.tagged("player-controls") != null)
                 .put("track", track?.id?.let { "${it.source.storageValue}:${it.value}" } ?: JSONObject.NULL)
@@ -329,9 +375,13 @@ fun main(args: Array<String>) = runBlocking {
                             codePoint = character.code, nativeEvent = typed))
                         settle(16)
                     }
-                } else if (coordinates.startsWith("tap@") || coordinates.startsWith("tap-first@") || coordinates.startsWith("hold-tag@")) {
+                } else if (coordinates.startsWith("tap@") || coordinates.startsWith("tap-first@") || coordinates.startsWith("hold-tag@") ||
+                    coordinates.startsWith("touch-tap@") || coordinates.startsWith("touch-tap-first@") ||
+                    coordinates.startsWith("right-click@") || coordinates.startsWith("right-click-first@")) {
                     val requested = coordinates.substringAfter('@')
-                    val prefix = coordinates.startsWith("tap-first@")
+                    val touch = coordinates.startsWith("touch-")
+                    val secondary = coordinates.startsWith("right-click")
+                    val prefix = coordinates.startsWith("tap-first@") || coordinates.startsWith("touch-tap-first@") || coordinates.startsWith("right-click-first@")
                     fun matchingTag() = if (!prefix) requested else scene.captureSemantics().firstOrNull {
                         it.config.getOrNull(SemanticsProperties.TestTag)?.startsWith(requested) == true && !it.boundsInWindow.isEmpty &&
                             it.config.contains(SemanticsActions.OnClick)
@@ -352,7 +402,7 @@ fun main(args: Array<String>) = runBlocking {
                     // clipped bounds from the first spring frame.
                     var stableFrames = 0
                     var previousBounds = target.boundsInWindow
-                    awaitUi {
+                    awaitUi(timeoutMs = 15_000L) {
                         val current = scene.captureSemantics().tagged(tag)?.let(::pointerTarget)
                         if (current == null || current.boundsInWindow.isEmpty) {
                             stableFrames = 0
@@ -368,17 +418,41 @@ fun main(args: Array<String>) = runBlocking {
                             stableFrames >= 4
                         }
                     }
-                    check(stableFrames >= 4) { "$tag did not settle before physical click at $name" }
+                    check(stableFrames >= 4) { "$tag did not settle before physical click at $name: stableFrames=$stableFrames bounds=$previousBounds" }
                     val point = target.boundsInWindow.center
                     println("Physical click $name: $tag at $point")
                     // A desktop mouse reaches the target before pressing; render
                     // that move so popup disposal and new hit-test paths settle.
                     // Keep down/up on separate frames for pointer coroutines.
-                    scene.sendPointerEvent(PointerEventType.Move, point)
-                    settle(16)
-                    scene.sendPointerEvent(PointerEventType.Press, point, button = PointerButton.Primary)
+                    val pointerType = if (touch) PointerType.Touch else PointerType.Mouse
+                    inputEvidence.put(JSONObject().put("step", name).put("type", if (touch) "Touch" else "Mouse")
+                        .put("action", if (secondary) "right-click" else "tap").put("x", point.x).put("y", point.y))
+                    if (!touch) { scene.sendPointerEvent(PointerEventType.Move, point); settle(16) }
+                    scene.sendPointerEvent(PointerEventType.Press, point, type = pointerType, button = if (touch) null else if (secondary) PointerButton.Secondary else PointerButton.Primary)
                     settle(if (hold) 700 else 32)
-                    scene.sendPointerEvent(PointerEventType.Release, point, button = PointerButton.Primary)
+                    scene.sendPointerEvent(PointerEventType.Release, point, type = pointerType, button = if (touch) null else if (secondary) PointerButton.Secondary else PointerButton.Primary)
+                } else if (coordinates.startsWith("touch-drag@") || coordinates.startsWith("touch-edge@") || coordinates.startsWith("mouse-drag@")) {
+                    val (tag, dx, dy) = coordinates.substringAfter('@').split(',')
+                    val bounds = checkNotNull(scene.captureSemantics().tagged(tag)) { "Missing touch target $tag" }.boundsInWindow
+                    val point = if (coordinates.startsWith("touch-edge@")) Offset(bounds.left + 12 * density, bounds.center.y) else bounds.center
+                    val delta = Offset(dx.toFloat() * density, dy.toFloat() * density)
+                    val pointerType = if (coordinates.startsWith("mouse-drag@")) PointerType.Mouse else PointerType.Touch
+                    inputEvidence.put(JSONObject().put("step", name).put("type", pointerType.toString()).put("action", "drag")
+                        .put("start", JSONArray(listOf(point.x, point.y))).put("delta", JSONArray(listOf(delta.x, delta.y))))
+                    scene.sendPointerEvent(PointerEventType.Press, point, type = pointerType, button = if (pointerType == PointerType.Mouse) PointerButton.Primary else null)
+                    settle(32)
+                    for (frame in 1..24) {
+                        scene.sendPointerEvent(PointerEventType.Move, point + delta * (frame / 24f), type = pointerType)
+                        settle(16)
+                    }
+                    // Let velocity settle before lift so this checks distance/direction, not a fling.
+                    settle(160)
+                    scene.sendPointerEvent(PointerEventType.Release, point + delta, type = pointerType, button = if (pointerType == PointerType.Mouse) PointerButton.Primary else null)
+                } else if (coordinates.startsWith("hover@")) {
+                    val tag = coordinates.substringAfter('@')
+                    awaitUi { scene.captureSemantics().tagged(tag) != null }
+                    val node = checkNotNull(scene.captureSemantics().tagged(tag))
+                    scene.sendPointerEvent(PointerEventType.Move, node.boundsInWindow.center)
                 } else if (coordinates.startsWith("reveal@")) {
                     val tag = coordinates.substringAfter('@')
                     var revealed = false
@@ -404,7 +478,10 @@ fun main(args: Array<String>) = runBlocking {
                         val direction = if (centerY != null && centerY < topGuard) -1f else 1f
                         // Traverse long production settings pages by mouse wheel,
                         // with enough distance to return from their last slider.
-                        scene.sendPointerEvent(PointerEventType.Scroll, Offset(width * .5f, height * .55f), scrollDelta = Offset(0f, direction * 3f))
+                        // Aim inside the owning pane. Window center is the divider
+                        // in list-detail mode and would scroll the other page.
+                        val centerX = node?.let { it.positionInWindow.x + it.size.width / 2f } ?: width * .5f
+                        scene.sendPointerEvent(PointerEventType.Scroll, Offset(centerX.coerceIn(1f, width - 1f), height * .55f), scrollDelta = Offset(0f, direction * 3f))
                         settle(240)
                     }
                     check(revealed) { "Could not reveal production node $tag using mouse wheel at $name" }
@@ -440,9 +517,17 @@ fun main(args: Array<String>) = runBlocking {
                     scene.sendPointerEvent(PointerEventType.Press, Offset(x, y), button = PointerButton.Primary)
                     settle(700)
                     scene.sendPointerEvent(PointerEventType.Release, Offset(x, y), button = PointerButton.Primary)
-                } else if (coordinates.startsWith("drag@") || coordinates.startsWith("hold-drag@")) {
-                    val hold = coordinates.startsWith("hold-drag@")
-                    val (x, y, endX, endY) = if (hold) {
+                } else if (coordinates.startsWith("drag@") || coordinates.startsWith("hold-drag@") || coordinates.startsWith("hold-drag-between@")) {
+                    val between = coordinates.startsWith("hold-drag-between@")
+                    val hold = between || coordinates.startsWith("hold-drag@")
+                    val (x, y, endX, endY) = if (between) {
+                        val (from, to) = coordinates.substringAfter('@').split(',')
+                        val nodes = scene.captureSemantics()
+                        val start = requireNotNull(nodes.tagged(from)) { "Missing drag source $from" }.boundsInWindow.center
+                        val end = requireNotNull(nodes.tagged(to)) { "Missing drag destination $to" }.boundsInWindow.center
+                        println("Physical drag $name: $from at $start -> $to at $end")
+                        listOf(start.x, start.y, end.x, end.y)
+                    } else if (hold) {
                         val (tag, dx, dy) = coordinates.substringAfter('@').split(',')
                         val center = requireNotNull(scene.captureSemantics().tagged(tag)) { "Missing drag node $tag" }.boundsInWindow.center
                         listOf(center.x, center.y, center.x + dx.toFloat(), center.y + dy.toFloat())
@@ -477,6 +562,9 @@ fun main(args: Array<String>) = runBlocking {
                     .put("action_elapsed_ms", (System.nanoTime() - eventStart) / 1_000_000.0)
                 assertScene(name)
             }
+        } catch (failure: Throwable) {
+            runCatching { capture("failure") }
+            throw failure
         } finally {
             melox.playback.PlaybackCommands.playerController()?.release()
             File(output, "capture.json").writeText(JSONObject()
@@ -491,7 +579,7 @@ fun main(args: Array<String>) = runBlocking {
                 .put("enabled_start_tab", "--enable-start-tab" in args)
                 .put("play_id", playId ?: JSONObject.NULL)
                 .put("play_query", playQuery).put("scenes", sceneEvidence)
-                .put("steps", JSONArray(steps)).put("frames", frameEvidence).toString(2))
+                .put("steps", JSONArray(steps)).put("inputs", inputEvidence).put("frames", frameEvidence).toString(2))
             scene.close()
             // This process is finished. Real async lyric/artwork HTTP workers can
             // otherwise keep JavaExec alive after every scene/assertion was saved.

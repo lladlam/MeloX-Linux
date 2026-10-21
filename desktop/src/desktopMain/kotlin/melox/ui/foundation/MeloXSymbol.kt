@@ -37,7 +37,7 @@ enum class MeloXSymbol(
     Search("magnifyingglass", intArrayOf(0x1002AB)),
     ChevronLeft("chevron.left", intArrayOf(0x100189)),
     ChevronRight("chevron.right", intArrayOf(0x10018A)),
-    ChevronUpDown("chevron.chevron.down", intArrayOf(0x10018F)),
+    ChevronUpDown("chevron.up.chevron.down", intArrayOf(0x10018F)),
     XMark("xmark", intArrayOf(0x100184)),
     Ellipsis("ellipsis", intArrayOf(0x100360)),
     Clock("clock", intArrayOf(0x10042B)),
@@ -82,15 +82,24 @@ enum class MeloXSymbol(
     Book("book.pages", intArrayOf(0x10173E)),
     Chat("bubble.left", intArrayOf(0x10032A)),
     Volume("speaker.wave.2.fill", intArrayOf(0x1002A7)),
+    VolumeMuted("speaker.slash.fill", intArrayOf(0x1002A3)),
+    VolumeLow("speaker.wave.1.fill", intArrayOf(0x1002A5)),
+    VolumeHigh("speaker.wave.3.fill", intArrayOf(0x1002A9)),
     Queue("text.line.first.and.arrowtriangle.forward", intArrayOf(0x10163F)),
     Question("questionmark.circle", intArrayOf(0x10005C)),
     CheckCircle("checkmark.circle.fill", intArrayOf(0x100063)),
-    Cloud("cloud", intArrayOf(0x1002F8)),
-    Globe("globe", intArrayOf(0x10026D)),
-    HeartFill("heart.fill", intArrayOf(0x1002B4)),
-    Lyrics("text.bubble", intArrayOf(0x10032E)),
-    PersonFill("person.fill", intArrayOf(0x10026D)),
-    Star("star", intArrayOf(0x1001BF)),
+    Cloud("cloud", intArrayOf(0x1001C2)),
+    Globe("globe", intArrayOf(0x1001AA)),
+    HeartFill("heart.fill", intArrayOf(0x1002B5)),
+    Lyrics("text.bubble", intArrayOf(0x100332)),
+    PersonFill("person.fill", intArrayOf(0x10026A)),
+    Star("star", intArrayOf(0x1002C2)),
+    StarFill("star.fill", intArrayOf(0x1002C3)),
+    SquareGrid("square.grid.2x2", intArrayOf(0x1001F7)),
+    SquareStack("square.stack", intArrayOf(0x10040B)),
+    MusicMic("music.mic", intArrayOf(0x10046B)),
+    ICloud("icloud", intArrayOf(0x10030B)),
+    Messages("bubble.left.and.bubble.right", intArrayOf(0x1004A4)),
 }
 
 /**
@@ -148,8 +157,9 @@ fun MeloXSymbolIcon(
     size: Int = 22,
     iconSize: Int = size,
     weight: FontWeight = FontWeight.Normal,
+    nativeGlyph: Boolean = false,
 ) {
-    if (symbol == MeloXSymbol.Settings || symbol == MeloXSymbol.Home) {
+    if (!nativeGlyph && (symbol == MeloXSymbol.Settings || symbol == MeloXSymbol.Home)) {
         Icon(
             painter = painterResource(if (symbol == MeloXSymbol.Home) "icons/melox_home_tab.svg" else "icons/ic_melox_brand_gear.svg"),
             contentDescription = null,

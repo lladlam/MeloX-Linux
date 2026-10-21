@@ -56,7 +56,10 @@ object MeloXSettingsPreferences {
             "player_frosted_glass" -> MeloXSettingsRuntime.frostedGlassEnabled = value
             "player_keep_screen_on" -> MeloXSettingsRuntime.keepScreenOn = value
             "lyrics_translation" -> MeloXSettingsRuntime.showLyricTranslation = value
+            "general_desktop_layout" -> MeloXSettingsRuntime.desktopLayoutEnabled = value
+            "general_split_screen" -> MeloXSettingsRuntime.splitScreenEnabled = value
             "lyrics_auto_select" -> MeloXSettingsRuntime.automaticLyricSelectionEnabled = value
+            "bilibili_lyric_audio_alignment" -> MeloXSettingsRuntime.bilibiliLyricAudioAlignmentEnabled = value
             "experimental_lyric_strong_binding" -> MeloXSettingsRuntime.lyricStrongBindingEnabled = value
             "lyrics_romanization" -> MeloXSettingsRuntime.showLyricRomanization = value
             "lyrics_word_by_word" -> MeloXSettingsRuntime.lyricWordByWordEnabled = value
@@ -189,6 +192,9 @@ object MeloXSettingsPreferences {
                 MeloXThemeMode.valueOf(value)
             }.getOrDefault(MeloXThemeMode.System)
             "music_area" -> MeloXSettingsRuntime.musicArea = value
+            "lyric_language" -> MeloXSettingsRuntime.lyricLanguage = value
+            "general_split_navigation_position" -> MeloXSettingsRuntime.splitNavigationPosition = MeloXSplitChromePosition.fromPreference(value)
+            "general_split_mini_player_position" -> MeloXSettingsRuntime.splitMiniPlayerPosition = MeloXSplitChromePosition.fromPreference(value)
             "tab_order" -> MeloXSettingsRuntime.tabOrder = value.split(',')
                 .filter { it in setOf("Home", "Explore", "Library", "Podcasts", "Downloads", "Cloud", "Settings") }.distinct()
                 .let { order -> (order + listOf("Home", "Explore", "Library", "Podcasts", "Downloads", "Cloud", "Settings")).distinct() }

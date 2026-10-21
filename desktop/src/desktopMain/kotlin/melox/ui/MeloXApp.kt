@@ -80,6 +80,8 @@ import melox.ui.navigation.MeloXBottomChrome
 import melox.ui.navigation.Route
 import melox.ui.navigation.MeloXBackDispatcher
 import melox.ui.navigation.LocalMeloXBackDispatcher
+import melox.ui.navigation.meloXTrackPointerMode
+import melox.ui.navigation.meloXEdgeSwipeBack
 import melox.ui.navigation.MeloXBackHandler
 import melox.ui.screens.AlbumDetailScreen
 import melox.ui.screens.CloudScreen
@@ -125,6 +127,7 @@ fun MeloXApp(onExit: () -> Unit = { kotlin.system.exitProcess(0) }) {
     val backDispatchers = remember { AppTab.entries.associateWith { MeloXBackDispatcher() } }
     val playerBackDispatcher = remember { MeloXBackDispatcher() }
     var settingsRouteRequest by remember { mutableStateOf<String?>(null) }
+    var desktopLibraryPage by remember { mutableStateOf<String?>(null) }
     var onboardingLoginPending by remember { mutableStateOf(false) }
     LaunchedEffect(onboarding.stage, onboardingLoginPending) {
         if (onboarding.stage == melox.legal.MeloXOnboardingStage.Complete && onboardingLoginPending) {
@@ -134,6 +137,39 @@ fun MeloXApp(onExit: () -> Unit = { kotlin.system.exitProcess(0) }) {
     }
     val collectionTarget by melox.ui.navigation.MeloXCollectionLaunchBus.target.collectAsState()
     val collectionBackDispatcher = remember { MeloXBackDispatcher() }
+    val currentCollectionTarget by androidx.compose.runtime.rememberUpdatedState(collectionTarget)
+    // Keep the same real detail composition when the layout preference moves it
+    // between the full-window Android overlay and the Desktop navigation column.
+    val collectionLayer = remember {
+        androidx.compose.runtime.movableContentOf {
+            AnimatedContent(
+                targetState = currentCollectionTarget,
+                transitionSpec = {
+                    (slideInHorizontally(tween(280, easing = FastOutSlowInEasing)) { it } + fadeIn(tween(280))) togetherWith
+                        (slideOutHorizontally(tween(220, easing = FastOutSlowInEasing)) { it / 4 } + fadeOut(tween(220)))
+                },
+                modifier = Modifier.fillMaxSize().zIndex(if (MeloXSettingsRuntime.desktopLayoutEnabled) 0f else 30f),
+                label = "collection-overlay",
+            ) { target ->
+                CompositionLocalProvider(LocalMeloXBackDispatcher provides collectionBackDispatcher,
+                    melox.ui.glass.LocalMeloXLayerBackdrop provides null) {
+                    if (target != null) Box(Modifier.fillMaxSize().meloXEdgeSwipeBack {
+                        if (!collectionBackDispatcher.dispatch()) melox.ui.navigation.MeloXCollectionLaunchBus.dismiss()
+                    }) { when (target) {
+                        is melox.ui.navigation.MeloXCollectionTarget.Artist -> melox.ui.screens.ArtistDetailScreen(target.id,
+                            onBack = melox.ui.navigation.MeloXCollectionLaunchBus::dismiss)
+                        is melox.ui.navigation.MeloXCollectionTarget.Album -> AlbumDetailScreen(target.id.toString(), target.name,
+                            onBack = melox.ui.navigation.MeloXCollectionLaunchBus::dismiss)
+                        is melox.ui.navigation.MeloXCollectionTarget.Song -> melox.ui.desktop.MeloXDesktopSongDetail(target.id,
+                            onBack = melox.ui.navigation.MeloXCollectionLaunchBus::dismiss)
+                        is melox.ui.navigation.MeloXCollectionTarget.Playlist -> melox.ui.screens.PlaylistDetailScreen(
+                            melox.library.NeteasePlaylistSummary(target.id, target.name, null, 0, ""),
+                            onBack = melox.ui.navigation.MeloXCollectionLaunchBus::dismiss)
+                    } }
+                }
+            }
+        }
+    }
     val searchLaunch = melox.ui.navigation.MeloXSearchLaunchBus.request
 
     LaunchedEffect(Unit) {
@@ -150,32 +186,37 @@ fun MeloXApp(onExit: () -> Unit = { kotlin.system.exitProcess(0) }) {
         selectedTab = runCatching { AppTab.valueOf(restored) }.getOrDefault(AppTab.Home)
     }
 
-    // Pinned clipboard handling (`general_clipboard_links`): a single scan shortly after the
-    // first frame, deduplicated against the last text seen in this process. The AWT clipboard
-    // is unavailable in the offscreen/headless capture harness, so that path stays inert.
+    // MainActivity.onResume: scan after the first frame on each foreground entry.
+    // Wait for onboarding before reading; offscreen/headless scenes have no OS clipboard.
     var clipboardRequest by remember { mutableStateOf<String?>(null) }
-    val lastClipboardText = remember { java.util.concurrent.atomic.AtomicReference("") }
+    var clipboardInvitation by remember { mutableStateOf<melox.network.MeloXListenTogetherInvitation?>(null) }
+    var clipboardFailure by remember { mutableStateOf<String?>(null) }
+    val clipboardIntake = remember { melox.network.NeteaseClipboardIntake() }
+    val clipboardSource by androidx.compose.runtime.rememberUpdatedState(selectedSource)
+    val windowForeground = melox.ui.player.LocalMeloXWindowForeground.current
     val clipboardTarget = remember(clipboardRequest, selectedSource) {
         if (selectedSource == MusicSource.Netease) clipboardRequest?.let(melox.network.NeteaseClipboardLink::parse) else null
     }
     LaunchedEffect(clipboardRequest, clipboardTarget, selectedSource) {
         if (clipboardRequest != null && clipboardTarget == null) clipboardRequest = null
     }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(windowForeground, onboarding.stage, MeloXSettingsRuntime.clipboardLinksEnabled) {
+        if (!windowForeground || onboarding.stage != melox.legal.MeloXOnboardingStage.Complete) return@LaunchedEffect
         androidx.compose.runtime.withFrameNanos { }
         kotlinx.coroutines.delay(100)
         if (!MeloXSettingsRuntime.clipboardLinksEnabled) return@LaunchedEffect
         if (java.awt.GraphicsEnvironment.isHeadless()) return@LaunchedEffect
-        val text = runCatching {
-            java.awt.Toolkit.getDefaultToolkit().systemClipboard
-                .getData(java.awt.datatransfer.DataFlavor.stringFlavor) as? String
-        }.getOrNull()?.trim().orEmpty()
-        if (text.isBlank() || text == lastClipboardText.getAndSet(text)) return@LaunchedEffect
-        if (melox.network.parseNeteaseListenTogetherInvitation(text) != null) {
-            if (selectedSource == MusicSource.Netease) settingsRouteRequest = "ListenTogether"
-            return@LaunchedEffect
+        val text = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching {
+                java.awt.Toolkit.getDefaultToolkit().systemClipboard
+                    .getData(java.awt.datatransfer.DataFlavor.stringFlavor) as? String
+            }.getOrNull()
         }
-        clipboardRequest = text
+        when (val request = clipboardIntake.consume(text, MeloXSettingsRuntime.clipboardLinksEnabled, clipboardSource)) {
+            is melox.network.NeteaseClipboardRequest.Together -> clipboardInvitation = request.invitation
+            is melox.network.NeteaseClipboardRequest.Media -> clipboardRequest = text
+            null -> Unit
+        }
     }
 
     LaunchedEffect(selectedTab) {
@@ -200,6 +241,15 @@ fun MeloXApp(onExit: () -> Unit = { kotlin.system.exitProcess(0) }) {
 
     val currentTrack by AudioPlayer.currentTrack.collectAsState()
     val hasMedia = currentTrack != null
+    val listDetailMode = melox.layout.meloXUsesListDetail(androidx.compose.ui.platform.LocalWindowInfo.current.containerSize,
+        MeloXSettingsRuntime.splitScreenEnabled && !MeloXSettingsRuntime.desktopLayoutEnabled)
+    val chromeCoupled = melox.settings.meloXChromeScrollCoupled(listDetailMode, MeloXSettingsRuntime.splitNavigationPosition,
+        MeloXSettingsRuntime.splitMiniPlayerPosition)
+    val currentChromeCoupled by androidx.compose.runtime.rememberUpdatedState(chromeCoupled)
+    LaunchedEffect(listDetailMode, MeloXSettingsRuntime.splitNavigationPosition, MeloXSettingsRuntime.splitMiniPlayerPosition) {
+        tabBarMinimized = false
+        scrollAccumulator = 0f
+    }
 
     val openPlayer: () -> Unit = {
         if (hasMedia) {
@@ -217,6 +267,7 @@ fun MeloXApp(onExit: () -> Unit = { kotlin.system.exitProcess(0) }) {
     }
 
     val playerOpen = playerTransitionState.currentState || playerTransitionState.targetState
+    melox.ui.player.MeloXImmersivePlaybackEffect(hasMedia && playerOpen && MeloXSettingsRuntime.immersivePlaybackEnabled)
     LaunchedEffect(searchLaunch) {
         if (searchLaunch != null) {
             closePlayer()
@@ -257,6 +308,7 @@ fun MeloXApp(onExit: () -> Unit = { kotlin.system.exitProcess(0) }) {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
                 if (source != NestedScrollSource.UserInput) return Offset.Zero
+                if (!currentChromeCoupled || MeloXSettingsPreferences.boolean("general_disable_auto_tabbar_shrink", false)) return Offset.Zero
                 val y = available.y
                 if (y < 0f) {
                     if (scrollAccumulator > 0f) scrollAccumulator = 0f
@@ -310,57 +362,75 @@ fun MeloXApp(onExit: () -> Unit = { kotlin.system.exitProcess(0) }) {
     }
     val resolvedTheme = melox.settings.resolveMeloXTheme(MeloXSettingsRuntime.themeMode, systemDark)
     MaterialTheme(
-        colorScheme = if (resolvedTheme == melox.settings.MeloXResolvedTheme.Light) meloXLightScheme() else meloXDarkScheme(),
+        colorScheme = (if (resolvedTheme == melox.settings.MeloXResolvedTheme.Light) meloXLightScheme() else meloXDarkScheme()).let { scheme ->
+            if (!MeloXSettingsRuntime.desktopLayoutEnabled) scheme
+            else if (resolvedTheme == melox.settings.MeloXResolvedTheme.Light) scheme.copy(background = Color(0xFFF6F6F6), surface = Color.White,
+                onSurface = Color(0xFF202020), onBackground = Color(0xFF202020))
+            else scheme.copy(background = Color(0xFF1E1E1E), surface = Color(0xFF17171A),
+                onSurface = Color(0xFFF0F0F0), onBackground = Color(0xFFDDDDDD))
+        },
         typography = melox.ui.theme.MeloXMaterialTypography,
         shapes = melox.ui.theme.MeloXMaterialShapes,
     ) {
         CompositionLocalProvider(androidx.compose.material3.LocalContentColor provides MaterialTheme.colorScheme.onBackground) {
+        if (MeloXSettingsRuntime.desktopLayoutEnabled) melox.ui.desktop.MeloXDesktopToolHost {
+            settingsRouteRequest = "NeteaseLogin"; selectedTab = AppTab.Settings
+        }
         if (onboarding.stage == melox.legal.MeloXOnboardingStage.Complete) melox.ui.screens.RemoteCompatibilityNotice()
-        clipboardTarget?.let { target ->
-            melox.ui.foundation.MeloXGlassDialog(
-                visible = true,
-                onDismiss = { clipboardRequest = null },
-                title = melox.ui.legal.pinnedString("app_clipboard_title"),
-            ) {
-                Text(
-                    text = melox.ui.legal.pinnedString(
-                        if (target is melox.network.NeteaseClipboardTarget.Song) "app_clipboard_song" else "app_clipboard_playlist",
-                    ),
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .72f),
-                    fontSize = 15.sp,
-                    modifier = Modifier.testTag("clipboard-link-message").padding(bottom = 14.dp),
-                )
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    melox.ui.screens.SettingsActionButton(
-                        melox.ui.legal.pinnedString("action_cancel"),
-                        Modifier.weight(1f).testTag("clipboard-cancel"),
-                    ) { clipboardRequest = null }
-                    melox.ui.screens.SettingsActionButton(
-                        melox.ui.legal.pinnedString("app_confirm"),
-                        Modifier.weight(1f).testTag("clipboard-confirm"),
-                    ) {
-                        clipboardRequest = null
-                        playerScope.launch {
-                            val client = melox.library.NeteaseLibraryClient(cookieProvider = { melox.account.NeteaseSessionStore.readCookie() })
-                            val songs = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                runCatching {
-                                    when (target) {
-                                        is melox.network.NeteaseClipboardTarget.Song -> client.songDetailsBlocking(listOf(target.id))
-                                        is melox.network.NeteaseClipboardTarget.Playlist -> client.playlistDetailBlocking(target.id).songs
-                                    }
-                                }.getOrElse { emptyList() }
-                            }
-                            songs.firstOrNull()?.let { PlaybackCommands.playQueue(songs, it.id) }
-                        }
-                    }
-                }
+        clipboardInvitation?.let { invitation ->
+            androidx.compose.runtime.key(invitation) {
+                MeloXListenTogetherInviteDialog(invitation, onDismiss = { clipboardInvitation = null })
             }
         }
+        clipboardFailure?.let { message ->
+            androidx.compose.material3.AlertDialog(
+                modifier = Modifier.testTag("clipboard-playback-error"),
+                onDismissRequest = { clipboardFailure = null },
+                title = { Text(melox.ui.legal.pinnedString("search_play_failed")) },
+                text = { Text(message) },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = { clipboardFailure = null }, modifier = Modifier.testTag("clipboard-error-close")) {
+                        Text(melox.ui.legal.pinnedString("app_confirm"))
+                    }
+                },
+            )
+        }
+        clipboardTarget?.let { target ->
+            MeloXClipboardLinkDialog(
+                target = target,
+                onDismiss = { clipboardRequest = null },
+                onConfirm = {
+                    clipboardRequest = null
+                    val revision = melox.account.NeteaseSessionStore.revision.value
+                    playerScope.launch {
+                        try {
+                            val client = melox.library.NeteaseLibraryClient(cookieProvider = { melox.account.NeteaseSessionStore.readCookie() })
+                            val songs = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                when (target) {
+                                    is melox.network.NeteaseClipboardTarget.Song -> client.songDetailsBlocking(listOf(target.id))
+                                    is melox.network.NeteaseClipboardTarget.Playlist -> client.playlistDetailBlocking(target.id).songs
+                                }
+                            }
+                            if (clipboardSource != MusicSource.Netease || revision != melox.account.NeteaseSessionStore.revision.value) return@launch
+                            val first = songs.firstOrNull() ?: error("链接未返回可播放的歌曲")
+                            PlaybackCommands.playQueue(songs, first.id, onFailure = { failure ->
+                                playerScope.launch { clipboardFailure = failure.message ?: "播放失败" }
+                            })
+                        } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                        catch (failure: Exception) {
+                            clipboardFailure = failure.message ?: "读取链接失败"
+                        }
+                    }
+                },
+            )
+        }
+        melox.ui.desktop.MeloXWindowFrame {
         SharedTransitionLayout(modifier = Modifier.fillMaxSize()) {
             val sharedScope = this
             Box(
                 modifier = Modifier
                     .fillMaxSize()
+                    .meloXTrackPointerMode()
                     .background(MaterialTheme.colorScheme.background)
                     .onPreviewKeyEvent { event ->
                         if (event.type != KeyEventType.KeyUp || event.key != Key.Escape) return@onPreviewKeyEvent false
@@ -385,6 +455,19 @@ fun MeloXApp(onExit: () -> Unit = { kotlin.system.exitProcess(0) }) {
                 // above the bottom chrome) ──
                 val pageBackdrop = melox.ui.glass.rememberMeloXLayerBackdrop()
                 CompositionLocalProvider(melox.ui.glass.LocalMeloXLayerBackdrop provides pageBackdrop) {
+                CompositionLocalProvider(melox.ui.glass.LocalMeloXLayerBackdrop provides null) {
+                melox.ui.desktop.MeloXInterfaceLayout(
+                    hasMedia = hasMedia, selectedTab = selectedTab, source = selectedSource,
+                    libraryPage = desktopLibraryPage,
+                    onSelect = { tab, page -> melox.ui.navigation.MeloXCollectionLaunchBus.clear(); desktopLibraryPage = page; selectedTab = tab },
+                    onAccount = { selectedTab = AppTab.Settings },
+                    onOpenMessages = { messagesVisible = true },
+                    onLogin = { selectedTab = AppTab.Settings; settingsRouteRequest = "NeteaseLogin" },
+                    onExpandPlayer = openPlayer, playerOpen = playerOpen,
+                    backdrop = pageBackdrop,
+                    modifier = Modifier.meloXRecordBackdrop(pageBackdrop).nestedScroll(tabBarMinimizeConnection),
+                    collectionOverlay = { collectionLayer() },
+                ) {
                 AnimatedContent(
                     targetState = selectedTab,
                     transitionSpec = {
@@ -393,9 +476,7 @@ fun MeloXApp(onExit: () -> Unit = { kotlin.system.exitProcess(0) }) {
                             fadeOut(MeloXMotion.contentExitTween())
                     },
                     modifier = Modifier
-                        .fillMaxSize()
-                        .meloXRecordBackdrop(pageBackdrop)
-                        .nestedScroll(tabBarMinimizeConnection),
+                        .fillMaxSize(),
                     label = "melox-page-transition",
                 ) { tab ->
                     // Descendants being recorded must not sample their own page layer.
@@ -406,12 +487,16 @@ fun MeloXApp(onExit: () -> Unit = { kotlin.system.exitProcess(0) }) {
                         TabContent(
                             tab = tab,
                             source = selectedSource,
+                            libraryPageRequest = desktopLibraryPage,
                             settingsRouteRequest = if (tab == AppTab.Settings) settingsRouteRequest else null,
                             onSettingsRouteConsumed = { settingsRouteRequest = null },
                             onOpenTool = { tool ->
                                 when (tool) {
                                      "Messages" -> messagesVisible = true
-                                     "Home" -> selectedTab = AppTab.Home
+                                      "Home" -> selectedTab = AppTab.Home
+                                     "Login" -> { settingsRouteRequest = "NeteaseLogin"; selectedTab = AppTab.Settings }
+                                     "Playlists" -> { desktopLibraryPage = "Playlists"; selectedTab = AppTab.Library }
+                                     "Explore" -> selectedTab = AppTab.Explore
                                     "Podcasts" -> selectedTab = AppTab.Podcasts
                                     "Downloads" -> selectedTab = AppTab.Downloads
                                     "Cloud" -> selectedTab = AppTab.Cloud
@@ -425,15 +510,18 @@ fun MeloXApp(onExit: () -> Unit = { kotlin.system.exitProcess(0) }) {
                     }
                     }
                 }
+                }
+                }
 
                 // ── Bottom chrome overlay (Android: aligned BottomCenter,
                 // not inside a Column) ──
-                Box(modifier = Modifier.align(Alignment.BottomCenter).zIndex(10f)) {
+                if (!MeloXSettingsRuntime.desktopLayoutEnabled) Box(modifier = Modifier.align(Alignment.BottomCenter).zIndex(10f)) {
                 MeloXBottomChrome(
                     selectedTab = selectedTab,
                     hasMedia = hasMedia,
                     minimized = tabBarMinimized,
                     visibleRootTabs = visibleTabs,
+                    split = listDetailMode,
                     onSelect = { tab ->
                         tabBarMinimized = false
                         scrollAccumulator = 0f
@@ -448,6 +536,7 @@ fun MeloXApp(onExit: () -> Unit = { kotlin.system.exitProcess(0) }) {
                             val miniVisibility = this
                             MeloXMiniPlayer(
                                 compactProgress = compactProgress,
+                                vertical = listDetailMode && MeloXSettingsRuntime.splitMiniPlayerPosition.isSideRail,
                                 onExpand = openPlayer,
                                 sharedTransitionScope = sharedScope,
                                 animatedVisibilityScope = miniVisibility,
@@ -463,7 +552,9 @@ fun MeloXApp(onExit: () -> Unit = { kotlin.system.exitProcess(0) }) {
                     enter = slideInHorizontally(tween(300, easing = FastOutSlowInEasing)) { it },
                     exit = slideOutHorizontally(tween(300, easing = FastOutSlowInEasing)) { it },
                 ) {
-                    MessagesScreen(onBack = { messagesVisible = false })
+                    MessagesScreen(onBack = { messagesVisible = false }, onLogin = {
+                        messagesVisible = false; selectedTab = AppTab.Settings; settingsRouteRequest = "NeteaseLogin"
+                    })
                 }
 
                 // ── Full player overlay (zIndex 20, Android lines 647–702) ──
@@ -516,30 +607,19 @@ fun MeloXApp(onExit: () -> Unit = { kotlin.system.exitProcess(0) }) {
                         }
                     }
                 }
-                AnimatedContent(
-                    targetState = collectionTarget,
-                    transitionSpec = {
-                        (slideInHorizontally(tween(280, easing = FastOutSlowInEasing)) { it } + fadeIn(tween(280))) togetherWith
-                            (slideOutHorizontally(tween(220, easing = FastOutSlowInEasing)) { it / 4 } + fadeOut(tween(220)))
-                    },
-                    modifier = Modifier.fillMaxSize().zIndex(30f),
-                    label = "collection-overlay",
-                ) { target ->
-                    CompositionLocalProvider(LocalMeloXBackDispatcher provides collectionBackDispatcher,
-                        melox.ui.glass.LocalMeloXLayerBackdrop provides null) {
-                        when (target) {
-                            is melox.ui.navigation.MeloXCollectionTarget.Artist -> melox.ui.screens.ArtistDetailScreen(target.id,
-                                onBack = melox.ui.navigation.MeloXCollectionLaunchBus::dismiss)
-                            is melox.ui.navigation.MeloXCollectionTarget.Album -> AlbumDetailScreen(target.id.toString(), target.name,
-                                onBack = melox.ui.navigation.MeloXCollectionLaunchBus::dismiss)
-                            null -> Unit
-                        }
-                    }
-                }
+                if (!MeloXSettingsRuntime.desktopLayoutEnabled) collectionLayer()
                 }
             }
         }
-        when (onboarding.stage) {
+        }
+        // The legal consent gate is Windows-specific and is shown first. The
+        // Mac three-page onboarding then replaces only the Connect stage.
+        if (MeloXSettingsRuntime.desktopLayoutEnabled && onboarding.stage == melox.legal.MeloXOnboardingStage.Connect) {
+            melox.ui.desktop.MeloXDesktopOnboarding { login ->
+                onboarding.finishConnection()
+                if (login) { selectedTab = AppTab.Settings; onboardingLoginPending = true }
+            }
+        } else when (onboarding.stage) {
             melox.legal.MeloXOnboardingStage.Legal -> melox.ui.legal.MeloXFirstLaunchLegalConsent(
                 onAgree = onboarding::agreeLegal, onDecline = onExit,
                 onOpenProject = { runCatching { java.awt.Desktop.getDesktop().browse(java.net.URI("https://github.com/lladlam/MeloX-Android")) } },
@@ -582,6 +662,7 @@ private fun TabContent(
     onOpenTool: (String) -> Unit,
     onSourceSelected: (MusicSource) -> Unit,
     settingsRouteRequest: String? = null,
+    libraryPageRequest: String? = null,
     onSettingsRouteConsumed: () -> Unit = {},
 ) {
     val navState = melox.ui.navigation.rememberMeloXNavState()
@@ -623,7 +704,7 @@ private fun TabContent(
                 onOpenPlaylist = openPlaylist,
                 onOpenProviderPlaylist = openProviderPlaylist,
             )
-            AppTab.Library -> LibraryScreen(navState = navState)
+            AppTab.Library -> LibraryScreen(navState = navState, requestedPage = libraryPageRequest)
             AppTab.Podcasts -> PodcastsScreen(navState = navState)
             AppTab.Downloads -> DownloadsScreen(navState = navState)
             AppTab.Cloud -> CloudScreen(navState = navState)
@@ -635,23 +716,24 @@ private fun TabContent(
                 onOpenMessages = { navState.navigateTo(Route.Messages) },
                 onOpenServices = { navState.navigateTo(Route.ProviderServices) },
                 onOpenLogin = { loginInitialProvider = null; navState.navigateTo(Route.Login) },
+                onDesktopDismiss = { onOpenTool("Home") },
             )
             AppTab.Search -> SearchScreen(source = source,
                 onSearchExit = { onOpenTool("Home") }, onOpenPodcasts = { onOpenTool("Podcasts") })
         }
         when (navState.currentRoute) {
             Route.Login -> LoginScreen(navState, initialProviderId = loginInitialProvider)
-            Route.Messages -> MessagesScreen()
+            Route.Messages -> MessagesScreen(onLogin = { onOpenTool("Login") })
             Route.ProviderServices -> ProviderServicesScreen(navState)
             else -> Unit
         }
-        selectedPlaylist?.let { playlist ->
+        melox.ui.navigation.MeloXDetailOverlay(selectedPlaylist, onBack = { selectedPlaylist = null }) { playlist ->
             PlaylistDetailScreen(
                 playlist = playlist,
                 onBack = { selectedPlaylist = null },
             )
         }
-        selectedAlbum?.let { (id, name) ->
+        melox.ui.navigation.MeloXDetailOverlay(selectedAlbum, onBack = { selectedAlbum = null }) { (id, name) ->
             AlbumDetailScreen(
                 albumId = id,
                 albumName = name,

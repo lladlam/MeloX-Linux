@@ -22,7 +22,11 @@ class LocalMediaScanner(
                 recognizedNeteaseId = old.recognizedNeteaseId, recognizedTitle = old.recognizedTitle,
                 recognizedArtist = old.recognizedArtist, recognizedAlbum = old.recognizedAlbum,
                 recognizedArtworkUrl = old.recognizedArtworkUrl, cachedLyrics = old.cachedLyrics,
+                // Keep a known duration while the file itself did not change.
+                durationMs = old.durationMs.takeIf { it > 0L && old.lastModifiedMs == scanned.lastModifiedMs } ?: scanned.durationMs,
             ) } ?: scanned
+        }.map { record ->
+            if (record.durationMs > 0L) record else record.copy(durationMs = probeDurationMs(record))
         }
         repository.replaceTracks(records)
         records
@@ -30,6 +34,35 @@ class LocalMediaScanner(
 
     private fun defaultMusicDirectory(): File =
         File(meloXDataDir(), "music").takeIf(File::isDirectory) ?: File(System.getProperty("user.home"), "Music")
+
+    /** Read Duration from the bundled FFmpeg so desktop playback can show and seek real time. */
+    private fun probeDurationMs(record: LocalTrackRecord): Long {
+        val command = melox.player.FfmpegLocator.command()
+        if (command.isEmpty()) return 0L
+        val file = runCatching {
+            when {
+                record.contentUri.startsWith("file:", true) -> File(java.net.URI(record.contentUri))
+                record.contentUri.contains("://") -> null
+                else -> File(record.contentUri)
+            }
+        }.getOrNull()
+        if (file == null || !file.isFile) return 0L
+        return runCatching {
+            val process = ProcessBuilder(command + listOf("-hide_banner", "-i", file.absolutePath, "-t", "0.01", "-f", "null", "-"))
+                .redirectErrorStream(true)
+                .start()
+            val output = process.inputStream.bufferedReader().use { it.readText() }
+            if (!process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                return 0L
+            }
+            Regex("""Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)""").find(output)?.let { match ->
+                val (hours, minutes, seconds) = match.destructured
+                val totalMs = (hours.toLong() * 3600 + minutes.toLong() * 60) * 1000 + (seconds.toDouble() * 1000).toLong()
+                totalMs.takeIf { it > 0L }
+            } ?: 0L
+        }.getOrDefault(0L)
+    }
 
     private fun scanDirectory(directory: File): List<LocalTrackRecord> = buildList {
         val children = runCatching { directory.listFiles()?.toList() }.getOrNull().orEmpty()

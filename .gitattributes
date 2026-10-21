@@ -1,5 +1,19 @@
 desktop/src/main/resources/decoder/ffmpeg filter=lfs diff=lfs merge=lfs -text
-desktop/src/main/resources/fonts/*.ttf -text
-desktop/src/main/resources/parity/*.json text eol=lf
-desktop/src/main/resources/parity/*.properties text eol=lf
+desktop/src/main/resources/decoder/ffmpeg.exe filter=lfs diff=lfs merge=lfs -text
 desktop/src/main/resources/legal/*.md text eol=lf
+desktop/src/main/resources/parity/pinned-settings-strings.properties text eol=lf
+desktop/src/main/resources/fonts/*.ttf -text
+desktop/src/main/resources/parity/mi-lan-pro-static.json text eol=lf
+desktop/src/main/resources/parity/*.json text eol=lf
+desktop/src/main/resources/parity/pinned-lyrics-strings.properties text eol=lf
+desktop/src/main/resources/parity/pinned-skyline-strings.properties text eol=lf
+desktop/src/main/resources/parity/pinned-settings-pages*.properties text eol=lf
+desktop/src/main/resources/parity/pinned-v065-lyric-language.properties text eol=lf
+desktop/src/main/resources/parity/pinned-v065-split-layout.properties text eol=lf
+desktop/src/main/resources/icons/pinned-v065-launcher-foreground.png -text
+shared/src/desktopMain/resources/AudioFingerprint/* -text -whitespace
+desktop/src/main/resources/parity/desktop-reference-*.properties text eol=lf
+parity/desktop-a41ea0e/evidence/six-ui-local/**/*.log -whitespace
+desktop/src/main/resources/parity/legal/*.txt text eol=lf
+desktop/src/main/resources/parity/legal/*.md text eol=lf
+desktop/src/main/resources/parity/desktop-logo.png -text

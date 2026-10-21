@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -22,6 +23,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -36,9 +38,10 @@ import melox.ui.foundation.MeloXIosTopBar
 import melox.ui.foundation.MeloXSymbol
 import melox.ui.glass.MeloXGlassTextField
 import melox.ui.theme.MeloXColors
+import melox.settings.MeloXSettingsRuntime
 
 @Composable
-fun MessagesScreen(onBack: (() -> Unit)? = null) {
+fun MessagesScreen(onBack: (() -> Unit)? = null, onLogin: (() -> Unit)? = null) {
     val loggedIn = remember { NeteaseSessionStore.containsMusicU(NeteaseSessionStore.readCookie()) }
     var contacts by remember { mutableStateOf<List<MeloXMessageContact>>(emptyList()) }
     var selected by remember { mutableStateOf<MeloXMessageContact?>(null) }
@@ -54,6 +57,10 @@ fun MessagesScreen(onBack: (() -> Unit)? = null) {
         loading = false
     }
     val open = selected
+    if (MeloXSettingsRuntime.desktopLayoutEnabled) {
+        melox.ui.desktop.MeloXDesktopMessages(onLogin ?: { onBack?.invoke() ?: Unit })
+        return
+    }
     if (open != null) {
         MessageThread(contact = open, onBack = { selected = null })
         return
@@ -88,7 +95,7 @@ fun MessagesScreen(onBack: (() -> Unit)? = null) {
 }
 
 @Composable
-private fun MessageThread(contact: MeloXMessageContact, onBack: () -> Unit) {
+private fun MessageThread(contact: MeloXMessageContact, onBack: () -> Unit, desktop: Boolean = false) {
     val ops = remember { NeteaseMusicOperationsClient(cookieProvider = { NeteaseSessionStore.readCookie() }) }
     val scope = rememberCoroutineScope()
     var history by remember(contact.id) { mutableStateOf<List<MeloXPrivateMessage>>(emptyList()) }
@@ -99,22 +106,25 @@ private fun MessageThread(contact: MeloXMessageContact, onBack: () -> Unit) {
             .onSuccess { history = it }
             .onFailure { error = it.message ?: "会话加载失败" }
     }
-    Column(Modifier.fillMaxSize().background(MeloXColors.pageBackground()).padding(top = 18.dp)) {
+    Column(Modifier.fillMaxSize().background(MeloXColors.pageBackground()).padding(top = if (desktop) 0.dp else 18.dp)) {
         MeloXIosTopBar(title = contact.name, onBack = onBack)
         error?.let {
             Text(it, color = MeloXColors.Error, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
         }
-        LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp)) {
+        LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(horizontal = if (desktop) 34.dp else 20.dp, vertical = 12.dp)) {
             items(history, key = { it.id }) { message ->
-                Text(
-                    message.text.ifBlank { message.resource?.title.orEmpty() },
-                    color = MeloXColors.pageOnSurface(),
-                    fontSize = 15.sp,
-                    modifier = Modifier.padding(vertical = 6.dp),
-                )
+                Box(Modifier.fillMaxWidth().padding(vertical = 4.dp), contentAlignment = Alignment.CenterStart) {
+                    Text(
+                        message.text.ifBlank { message.resource?.title.orEmpty() },
+                        color = MeloXColors.pageOnSurface(),
+                        fontSize = if (desktop) 13.5.sp else 15.sp,
+                        modifier = Modifier.background(androidx.compose.material3.MaterialTheme.colorScheme.surface, androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
+                            .padding(horizontal = 12.dp, vertical = 9.dp),
+                    )
+                }
             }
         }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = if (desktop) 34.dp else 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             MeloXGlassTextField(
                 value = draft,
                 onValueChange = { draft = it },

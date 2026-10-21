@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -85,6 +86,7 @@ import melox.network.MeloXSearchMediaItem
 import melox.network.NeteaseUniversalSearchClient
 import melox.playback.PlaybackCommands
 import melox.playback.ProviderPlaybackCommands
+import melox.settings.MeloXSettingsRuntime
 import melox.ui.foundation.MeloXIosTopBar
 import melox.ui.foundation.MeloXSearchBackMorphIcon
 import melox.ui.foundation.MeloXSymbol
@@ -106,6 +108,13 @@ private fun searchCategoryLabel(id: String): String = SearchCategories.indexOf(i
 
 private enum class SearchBackAction { ClearOverlay, ClearQuery, SwitchToHome }
 
+private sealed interface SearchDetailDestination {
+    data class Playlist(val value: MusicPlaylistSummary) : SearchDetailDestination
+    data class Album(val value: MusicAlbumSummary) : SearchDetailDestination
+    data class Artist(val value: MusicArtistSummary) : SearchDetailDestination
+    data class Media(val value: MeloXSearchMediaItem) : SearchDetailDestination
+}
+
 @Composable
 fun SearchScreen(
     source: MusicSource = MusicSource.Netease,
@@ -113,6 +122,7 @@ fun SearchScreen(
     onOpenPodcasts: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
+    val session = melox.account.rememberNeteaseSessionStore()
     val sessionRevision by NeteaseSessionStore.revision.collectAsState()
     val sessionCookie = remember(sessionRevision) { NeteaseSessionStore.readCookie() }
     val cookie = remember(sessionCookie) { { sessionCookie } }
@@ -171,6 +181,19 @@ fun SearchScreen(
     var loading by remember(source) { mutableStateOf(false) }
     var error by remember(source) { mutableStateOf<String?>(null) }
     var selectedActionSong by remember(source) { mutableStateOf<SearchSong?>(null) }
+    var actionAnchor by remember(source) { mutableStateOf<androidx.compose.ui.unit.IntOffset?>(null) }
+    // DesktopSearchView scope: catalog vs the signed-in user's library.
+    var libraryScope by remember { mutableStateOf(false) }
+    var searchSuggestions by remember { mutableStateOf<List<String>>(emptyList()) }
+    var librarySongsLoaded by remember(sessionRevision) { mutableStateOf(false) }
+    var libraryLiked by remember(sessionRevision) { mutableStateOf<List<SearchSong>>(emptyList()) }
+    var libraryRecent by remember(sessionRevision) { mutableStateOf<List<SearchSong>>(emptyList()) }
+    var libraryPlaylists by remember(sessionRevision) { mutableStateOf<List<NeteasePlaylistSummary>>(emptyList()) }
+    var libraryAlbums by remember(sessionRevision) { mutableStateOf<List<melox.network.MeloXAlbumSummary>>(emptyList()) }
+    var libraryArtists by remember(sessionRevision) { mutableStateOf<List<melox.network.MeloXLibraryArtistSummary>>(emptyList()) }
+    var libraryPodcasts by remember(sessionRevision) { mutableStateOf<List<melox.network.MeloXPodcast>>(emptyList()) }
+    val details = remember(sessionRevision) { melox.network.NeteaseCollectionDetailsClient({ sessionCookie }) }
+    val desktop = MeloXSettingsRuntime.desktopLayoutEnabled
     var songLinkResult by remember(source) { mutableStateOf(false) }
     val launch = melox.ui.navigation.MeloXSearchLaunchBus.request
     LaunchedEffect(launch, source) {
@@ -186,7 +209,9 @@ fun SearchScreen(
     }
 
     LaunchedEffect(source, availableKinds) {
-        if (kind !in availableKinds) kind = MeloXSearchKind.Songs
+        if (kind !in availableKinds || (MeloXSettingsRuntime.desktopLayoutEnabled && kind == MeloXSearchKind.Users)) {
+            kind = MeloXSearchKind.Songs
+        }
     }
     LaunchedEffect(source, sessionRevision) {
         if (source == MusicSource.Netease) {
@@ -208,7 +233,14 @@ fun SearchScreen(
         catch (failure: Exception) { categoryError = failure.message ?: pinnedString("search_category_failed") }
         finally { categoryLoading = false }
     }
-    LaunchedEffect(query, kind, source, searchTrigger, unifiedEnabled, unifiedSources, sessionRevision) {
+    // DesktopSearchView suggestions use a 300ms debounce and only the catalog scope.
+    LaunchedEffect(query, libraryScope, sessionRevision) {
+        if (query.isBlank() || libraryScope || sessionCookie.isBlank()) { searchSuggestions = emptyList(); return@LaunchedEffect }
+        delay(300)
+        searchSuggestions = runCatching { universal.searchSuggestions(query) }.getOrDefault(emptyList())
+    }
+
+    LaunchedEffect(query, kind, source, searchTrigger, unifiedEnabled, unifiedSources, sessionRevision, libraryScope) {
         unifiedFailures = emptyList()
         songLinkResult = false
         val keyword = query.trim()
@@ -224,7 +256,44 @@ fun SearchScreen(
             return@LaunchedEffect
         }
         error = null
-        if (!skipSearchDebounce) delay(1500)
+        if (libraryScope) {
+            songs = emptyList(); providerSongs = emptyList(); media = emptyList(); loading = true
+            try {
+                if (!NeteaseSessionStore.containsMusicU(sessionCookie)) {
+                    error = melox.ui.desktop.desktopString("ui.desktop.library.sign_in_message")
+                } else {
+                    if (!librarySongsLoaded) {
+                        val user = session.profile?.userId ?: throw IllegalStateException(melox.ui.desktop.desktopString("ui.desktop.library.sign_in_message"))
+                        val snapshot = library.snapshot(user)
+                        libraryLiked = snapshot.likedSongs
+                        libraryRecent = snapshot.recentSongs
+                        libraryPlaylists = snapshot.playlists
+                        libraryAlbums = details.subscribedAlbums()
+                        libraryArtists = details.subscribedArtists()
+                        libraryPodcasts = universal.subscribedPodcasts()
+                        librarySongsLoaded = true
+                    }
+                    fun matches(vararg values: String?) = values.filterNotNull().any { it.contains(keyword, ignoreCase = true) }
+                    when (kind) {
+                        MeloXSearchKind.Songs -> songs = (libraryLiked + libraryRecent).distinctBy { it.id }
+                            .filter { matches(it.name, it.artists, it.album) }
+                        MeloXSearchKind.Playlists -> media = libraryPlaylists.filter { matches(it.name, it.creatorName) }
+                            .map { MeloXSearchMediaItem(it.id, MeloXSearchKind.Playlists, it.name, it.creatorName, it.coverUrl, it.trackCount) }
+                        MeloXSearchKind.Albums -> media = libraryAlbums.filter { matches(it.name, it.artistText) }
+                            .map { MeloXSearchMediaItem(it.id, MeloXSearchKind.Albums, it.name, it.artistText, it.artworkUrl, it.size ?: 0) }
+                        MeloXSearchKind.Artists -> media = libraryArtists.filter { matches(it.name, it.aliases.joinToString(" ")) }
+                            .map { MeloXSearchMediaItem(it.id, MeloXSearchKind.Artists, it.name, it.aliases.firstOrNull().orEmpty(), it.artworkUrl) }
+                        MeloXSearchKind.Podcasts -> media = libraryPodcasts.filter { matches(it.name, it.host?.nickname, it.category) }
+                            .map { MeloXSearchMediaItem(it.id, MeloXSearchKind.Podcasts, it.name, it.host?.nickname.orEmpty(), it.artworkUrl, it.programCount) }
+                        else -> Unit
+                    }
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (failure: Exception) { error = failure.message ?: melox.ui.desktop.desktopString("ui.desktop.search.failed") }
+            finally { loading = false }
+            return@LaunchedEffect
+        }
+        if (!skipSearchDebounce) delay(if (MeloXSettingsRuntime.desktopLayoutEnabled) 320 else 1500)
         skipSearchDebounce = false
         loading = true
         val linkedId = if (source == MusicSource.Netease) parseSongLink(keyword) else null
@@ -244,7 +313,7 @@ fun SearchScreen(
         when (kind) {
             MeloXSearchKind.Songs -> {
                 media = emptyList()
-                if (unifiedEnabled) {
+                if (unifiedEnabled && !MeloXSettingsRuntime.desktopLayoutEnabled) {
                     songs = emptyList()
                     providerSongs = emptyList()
                     runCatching { unifiedService.searchSongs(keyword, unifiedSources, pageSizePerProvider = 25) }
@@ -349,41 +418,46 @@ fun SearchScreen(
             },
     ) {
         when {
-            selectedProviderPlaylist != null -> PlaylistDetailScreen(
-                playlist = MeloXLegacyUiBridge.playlist(selectedProviderPlaylist!!),
-                onBack = { selectedProviderPlaylist = null },
-            )
-            selectedProviderAlbum != null -> ProviderCollectionDetail(
-                title = selectedProviderAlbum!!.title,
-                subtitle = "",
-                artwork = selectedProviderAlbum!!.artworkUrl,
-                load = { (currentProvider as? AlbumCapability)?.albumDetail(selectedProviderAlbum!!)?.tracks.orEmpty() },
-                onBack = { selectedProviderAlbum = null },
-            )
-            selectedProviderArtist != null -> ProviderCollectionDetail(
-                title = selectedProviderArtist!!.name,
-                subtitle = "",
-                artwork = selectedProviderArtist!!.artworkUrl,
-                load = { (currentProvider as? ArtistCapability)?.artistDetail(selectedProviderArtist!!)?.tracks.orEmpty() },
-                onBack = { selectedProviderArtist = null },
-            )
-             selectedDetail?.kind == MeloXSearchKind.Artists -> ArtistDetailScreen(selectedDetail!!.id, onBack = { selectedDetail = null })
-             selectedDetail?.kind == MeloXSearchKind.Albums -> AlbumDetailScreen(selectedDetail!!.id.toString(), selectedDetail!!.title, onBack = { selectedDetail = null })
-              selectedDetail?.kind == MeloXSearchKind.Users -> AccountProfileScreen(selectedDetail!!.id, onBack = { selectedDetail = null })
-              selectedDetail?.kind == MeloXSearchKind.Podcasts -> PodcastDetail(universal,
-                  melox.network.MeloXPodcast(selectedDetail!!.id, selectedDetail!!.title, selectedDetail!!.artworkUrl),
-                  onBack = { selectedDetail = null })
-              selectedDetail != null -> PlaylistDetailScreen(NeteasePlaylistSummary(
-                  id = selectedDetail!!.id, name = selectedDetail!!.title, coverUrl = selectedDetail!!.artworkUrl,
-                  creatorName = selectedDetail!!.subtitle, trackCount = selectedDetail!!.trackCount),
-                  onBack = { selectedDetail = null })
-            categoryTitle != null -> SearchCategoryPage(
+            categoryTitle != null && !desktop -> SearchCategoryPage(
                 title = categoryTitle!!,
                 playlists = categoryPlaylists,
                 loading = categoryLoading,
                 error = categoryError,
                 onBack = { categoryTitle = null },
                 onPlaylist = { selectedDetail = it.asSearchItem() },
+            )
+            MeloXSettingsRuntime.desktopLayoutEnabled -> melox.ui.desktop.MeloXDesktopSearchScaffold(
+                query = query,
+                onQuery = { query = it; skipSearchDebounce = false },
+                onSubmit = {
+                    skipSearchDebounce = true
+                    searchTrigger += 1
+                    rememberSearchQuery(query)
+                    history = searchHistory()
+                },
+                suggestions = searchSuggestions,
+                onSuggestion = { picked ->
+                    query = picked; searchSuggestions = emptyList()
+                    skipSearchDebounce = true; searchTrigger += 1
+                },
+                libraryScope = libraryScope,
+                onScope = { libraryScope = it; skipSearchDebounce = true; searchTrigger += 1 },
+                kinds = availableKinds,
+                kind = kind,
+                onKind = { kind = it },
+                loading = loading,
+                error = error,
+                searched = query.isNotBlank(),
+                songs = songs,
+                providerSongs = providerSongs,
+                media = media,
+                onPlaySong = { song -> PlaybackCommands.playQueue(songs, song.id) },
+                onPlayProvider = { track -> ProviderPlaybackCommands.playQueue(
+                    tracks = providerSongs, selectedTrackId = track.id,
+                    onFailure = { failure -> error = failure.message ?: "播放失败" }) },
+                onOpenMedia = { selectedDetail = it },
+                onSongMenu = { song, anchor -> selectedActionSong = song; actionAnchor = anchor },
+                onRetry = { searchTrigger += 1 },
             )
             else -> Column(Modifier.fillMaxSize().padding(top = 26.dp).testTag("search-state").semantics {
                 stateDescription = if (unifiedEnabled) "Unified>${unifiedSources.sortedBy { it.storageValue }.joinToString(">") { it.storageValue }}" else "Provider>${source.storageValue}"
@@ -481,12 +555,41 @@ fun SearchScreen(
                 }
             }
         }
+        val destination = selectedProviderPlaylist?.let { SearchDetailDestination.Playlist(it) }
+            ?: selectedProviderAlbum?.let { SearchDetailDestination.Album(it) }
+            ?: selectedProviderArtist?.let { SearchDetailDestination.Artist(it) }
+            ?: selectedDetail?.let { SearchDetailDestination.Media(it) }
+        // Keep the result/category composition and scroll offset while details
+        // animate above it. Snapshot destinations also survive their exit frame.
+        melox.ui.navigation.MeloXDetailOverlay(destination, onBack = {
+            selectedDetail = null; selectedProviderPlaylist = null; selectedProviderAlbum = null; selectedProviderArtist = null
+        }) { target ->
+            when (target) {
+                is SearchDetailDestination.Playlist -> PlaylistDetailScreen(MeloXLegacyUiBridge.playlist(target.value), onBack = { selectedProviderPlaylist = null })
+                is SearchDetailDestination.Album -> ProviderCollectionDetail(target.value.title, "", target.value.artworkUrl,
+                    load = { (currentProvider as? AlbumCapability)?.albumDetail(target.value)?.tracks.orEmpty() }, onBack = { selectedProviderAlbum = null })
+                is SearchDetailDestination.Artist -> ProviderCollectionDetail(target.value.name, "", target.value.artworkUrl,
+                    load = { (currentProvider as? ArtistCapability)?.artistDetail(target.value)?.tracks.orEmpty() }, onBack = { selectedProviderArtist = null })
+                is SearchDetailDestination.Media -> {
+                    val item = target.value
+                    when (item.kind) {
+                        MeloXSearchKind.Artists -> ArtistDetailScreen(item.id, onBack = { selectedDetail = null })
+                        MeloXSearchKind.Albums -> AlbumDetailScreen(item.id.toString(), item.title, onBack = { selectedDetail = null })
+                        MeloXSearchKind.Users -> AccountProfileScreen(item.id, onBack = { selectedDetail = null })
+                        MeloXSearchKind.Podcasts -> PodcastDetail(universal, melox.network.MeloXPodcast(item.id, item.title, item.artworkUrl), onBack = { selectedDetail = null })
+                        else -> PlaylistDetailScreen(NeteasePlaylistSummary(item.id, item.title, item.artworkUrl,
+                            creatorName = item.subtitle, trackCount = item.trackCount), onBack = { selectedDetail = null })
+                    }
+                }
+            }
+        }
         selectedActionSong?.let { song ->
             MeloXSongActionsOverlay(
                 song = song,
                 queue = songs,
                 visible = true,
-                onDismiss = { selectedActionSong = null },
+                onDismiss = { selectedActionSong = null; actionAnchor = null },
+                desktopAnchor = actionAnchor,
             )
         }
     }
@@ -518,10 +621,14 @@ private fun SearchField(
     onBack: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
+    val desktop = MeloXSettingsRuntime.desktopLayoutEnabled
     MeloXGlassTextField(
         value = value,
         onValueChange = onValueChange,
-        modifier = Modifier.padding(horizontal = 20.dp).testTag("search-query"),
+        modifier = Modifier
+            .padding(horizontal = if (desktop) 34.dp else 20.dp)
+            .then(if (desktop) Modifier.widthIn(max = 520.dp) else Modifier)
+            .testTag("search-query"),
         leadingContent = {
             MeloXSearchBackMorphIcon(
                 focused = focused,
@@ -555,7 +662,7 @@ private fun SearchField(
         },
         textStyle = androidx.compose.ui.text.TextStyle(
             color = MaterialTheme.colorScheme.onSurface,
-            fontSize = 17.sp,
+            fontSize = if (desktop) 14.sp else 17.sp,
             lineHeight = 22.sp,
         ),
         keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Search),
@@ -570,14 +677,15 @@ private fun SearchScopes(
     availableKinds: List<MeloXSearchKind>,
     onKind: (MeloXSearchKind) -> Unit,
 ) {
+    val desktop = MeloXSettingsRuntime.desktopLayoutEnabled
     LazyRow(
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        contentPadding = PaddingValues(horizontal = if (desktop) 34.dp else 20.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(if (desktop) 6.dp else 8.dp),
     ) {
         items(availableKinds) { item ->
             MeloXGlassButton(
                 onClick = { onKind(item) },
-                modifier = Modifier.height(44.dp).testTag("search-kind-${item.name.lowercase()}").semantics { selected = item == kind },
+                modifier = Modifier.height(if (desktop) 32.dp else 44.dp).testTag("search-kind-${item.name.lowercase()}").semantics { selected = item == kind },
                 style = MeloXGlassButtonStyle.Bordered,
                 shape = MeloXShapes.capsule,
                 tint = if (item == kind) MeloXSystemColors.Blue.copy(alpha = .28f) else Color.Transparent,
@@ -600,24 +708,26 @@ private fun SearchDiscovery(
     onPlaylist: (NeteasePlaylistSummary) -> Unit,
     onCategory: (String) -> Unit,
 ) {
-    val categoryColumns = melox.ui.layout.rememberMeloXWindowInfo().gridColumns.coerceIn(2, 4)
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 140.dp)) {
+    val desktop = MeloXSettingsRuntime.desktopLayoutEnabled
+    val categoryColumns = if (desktop) 4 else melox.ui.layout.rememberMeloXWindowInfo().gridColumns.coerceIn(2, 4)
+    val horizontal = if (desktop) 34.dp else 20.dp
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = if (desktop) 104.dp else 140.dp)) {
         if (recommendations.isNotEmpty()) {
-            item { Text(pinnedString("search_trending"), modifier = Modifier.padding(start = 20.dp, top = 14.dp, bottom = 12.dp), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MeloXColors.pageOnSurface()) }
+            item { Text(pinnedString("search_trending"), modifier = Modifier.padding(start = horizontal, top = 14.dp, bottom = 12.dp), fontSize = if (desktop) 20.sp else 24.sp, fontWeight = FontWeight.Bold, color = MeloXColors.pageOnSurface()) }
             item {
-                LazyRow(contentPadding = PaddingValues(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                LazyRow(contentPadding = PaddingValues(horizontal = horizontal), horizontalArrangement = Arrangement.spacedBy(if (desktop) 20.dp else 14.dp)) {
                     items(recommendations, key = { it.id }) { playlist ->
-                        Column(Modifier.width(160.dp).clickable { onPlaylist(playlist) }) {
-                            MeloXArtworkImage(playlist.coverUrl, MeloXColors.SurfaceVariant, Modifier.size(160.dp).clip(RoundedCornerShape(14.dp)))
-                            Text(playlist.name, modifier = Modifier.padding(top = 7.dp), maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold, color = MeloXColors.pageOnSurface())
+                        Column(Modifier.width(if (desktop) 172.dp else 160.dp).clickable { onPlaylist(playlist) }) {
+                            MeloXArtworkImage(playlist.coverUrl, MeloXColors.SurfaceVariant, Modifier.size(if (desktop) 172.dp else 160.dp).clip(RoundedCornerShape(if (desktop) 9.dp else 14.dp)))
+                            Text(playlist.name, modifier = Modifier.padding(top = 7.dp), maxLines = 2, overflow = TextOverflow.Ellipsis, fontSize = if (desktop) 13.sp else 14.sp, fontWeight = FontWeight.SemiBold, color = MeloXColors.pageOnSurface())
                         }
                     }
                 }
             }
         }
-        item { Text(pinnedString("search_browse"), modifier = Modifier.padding(start = 20.dp, top = 26.dp, bottom = 12.dp), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MeloXColors.pageOnSurface()) }
+        item { Text(pinnedString("search_browse"), modifier = Modifier.padding(start = horizontal, top = 26.dp, bottom = 12.dp), fontSize = if (desktop) 20.sp else 24.sp, fontWeight = FontWeight.Bold, color = MeloXColors.pageOnSurface()) }
         items(SearchCategories.filter { it != "播客" || melox.settings.MeloXSettingsRuntime.podcastsEnabled }.chunked(categoryColumns)) { pair ->
-            Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = horizontal, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 pair.forEach { category -> SearchCategoryCard(category, Modifier.weight(1f)) { onCategory(category) } }
                 repeat(categoryColumns - pair.size) { Spacer(Modifier.weight(1f)) }
             }
@@ -637,8 +747,8 @@ private fun SearchCategoryCard(title: String, modifier: Modifier, onClick: () ->
     Box(
         modifier
             .testTag("search-category-${SearchCategories.indexOf(title)}")
-            .height(96.dp)
-            .clip(MeloXShapes.compact)
+            .height(if (MeloXSettingsRuntime.desktopLayoutEnabled) 78.dp else 96.dp)
+            .clip(if (MeloXSettingsRuntime.desktopLayoutEnabled) RoundedCornerShape(10.dp) else MeloXShapes.compact)
             .background(tint)
             .clickable(onClick = onClick)
             .padding(14.dp),
@@ -694,7 +804,8 @@ private fun SearchSongResults(
     onMore: ((SearchSong) -> Unit)? = null,
     onLike: ((SearchSong) -> Unit)? = null,
 ) {
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = MeloXBottomContentClearanceDp)) {
+    val desktop = MeloXSettingsRuntime.desktopLayoutEnabled
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = if (desktop) 34.dp else 20.dp, end = if (desktop) 34.dp else 20.dp, bottom = if (desktop) 104.dp else MeloXBottomContentClearanceDp)) {
         if (values.isEmpty()) item { Text(pinnedString("search_no_songs"), Modifier.padding(vertical = 20.dp).testTag("search-empty"), color = MaterialTheme.colorScheme.onSurface.copy(alpha = .46f)) }
         items(values, key = { it.id }) { song ->
             SearchSwipeSongRow(song, onPlay = { onPlay(song) }, onMore = onMore?.let { { it(song) } }, modifier = Modifier.testTag("search-song-${song.id}"),
@@ -714,10 +825,11 @@ private fun SearchSwipeSongRow(song: SearchSong, onPlay: () -> Unit, onMore: (()
         endActions = listOfNotNull(endAction),
         startFullSwipeActionIndex = if (melox.settings.MeloXSettingsRuntime.swipeFullAction == melox.settings.MeloXSwipeFullAction.AddToQueue) 1 else 0,
         onClick = onPlay, onLongClick = onMore, modifier = modifier) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
-            MeloXArtworkImage(song.artworkUrl, MeloXColors.SurfaceVariant, Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)))
+        val desktop = MeloXSettingsRuntime.desktopLayoutEnabled
+        Row(Modifier.fillMaxWidth().height(if (desktop) 54.dp else 70.dp).padding(horizontal = if (desktop) 8.dp else 12.dp, vertical = if (desktop) 5.dp else 9.dp), verticalAlignment = Alignment.CenterVertically) {
+            MeloXArtworkImage(song.artworkUrl, MeloXColors.SurfaceVariant, Modifier.size(if (desktop) 40.dp else 52.dp).clip(RoundedCornerShape(if (desktop) 6.dp else 8.dp)))
             Column(Modifier.padding(start = 12.dp).weight(1f)) {
-                Text(song.name, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MeloXColors.pageOnSurface(), fontSize = 17.sp, fontWeight = FontWeight.Medium)
+                Text(song.name, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MeloXColors.pageOnSurface(), fontSize = if (desktop) 14.sp else 17.sp, fontWeight = FontWeight.Medium)
                 Text(listOfNotNull(song.artists, song.album.takeIf(String::isNotBlank), sourceLabel).joinToString(" · "),
                     maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .5f), fontSize = 13.sp)
             }
@@ -767,7 +879,7 @@ private fun SearchMediaResults(values: List<MeloXSearchMediaItem>, onOpen: (Melo
                     Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MeloXColors.pageOnSurface(), fontWeight = FontWeight.Medium)
                     Text(item.subtitle.ifBlank { if (item.trackCount > 0) pinnedString("search_song_count_short", item.trackCount) else item.kind.title }, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MeloXColors.pageOnSurfaceVariant(), fontSize = 13.sp)
                 }
-                Text("›", color = MaterialTheme.colorScheme.onSurface.copy(alpha = .3f), fontSize = 18.sp)
+                MeloXSymbolIcon(MeloXSymbol.ChevronRight, size = 15, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .3f))
             }
         }
     }
@@ -836,12 +948,17 @@ private fun ProviderCollectionDetail(
     var tracks by remember(title, artwork) { mutableStateOf<List<MusicTrack>>(emptyList()) }
     var loading by remember(title, artwork) { mutableStateOf(true) }
     var error by remember(title, artwork) { mutableStateOf<String?>(null) }
-    LaunchedEffect(title, artwork) {
+    var reload by remember(title, artwork) { mutableIntStateOf(0) }
+    LaunchedEffect(title, artwork, reload) {
         loading = true
         runCatching { load() }
             .onSuccess { tracks = it }
             .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it; error = it.message ?: pinnedString("search_content_failed") }
         loading = false
+    }
+    if (MeloXSettingsRuntime.desktopLayoutEnabled) {
+        melox.ui.desktop.MeloXDesktopProviderCollection(title, subtitle, artwork, tracks, loading, error, onBack, { reload++ })
+        return
     }
     Column(Modifier.fillMaxSize().padding(top = 26.dp)) {
         MeloXIosTopBar(title = title, onBack = onBack)

@@ -99,12 +99,18 @@ private class LyricTouchInteractionSource : MutableInteractionSource {
 /** Owned above the page layers, so loading/upgrades survive Artwork↔Lyrics↔Queue. */
 @Composable
 internal fun rememberMeloXPlayerLyrics(track: MusicTrack): MeloXPlayerLyricsState {
-    val state = remember(track.id) { MeloXPlayerLyricsState(track) }
-    LaunchedEffect(track.id, MeloXSettingsRuntime.automaticLyricSelectionEnabled, MeloXSettingsRuntime.lyricStrongBindingEnabled) {
+    val preference = melox.lyrics.requestedLyricPreference()
+    // A new request owns new display state, including when language changes after 30s.
+    // Cancelled loads/upgrades can only hold the retired state, never the new language's state.
+    val state = remember(track, preference, MeloXSettingsRuntime.automaticLyricSelectionEnabled,
+        MeloXSettingsRuntime.lyricStrongBindingEnabled, MeloXSettingsRuntime.bilibiliLyricAudioAlignmentEnabled) {
+        MeloXPlayerLyricsState(track)
+    }
+    LaunchedEffect(state) {
         state.loading = true
         state.error = null
         try {
-            MeloXLyricsLoad.shared.observe(track).collect { document ->
+            MeloXLyricsLoad.shared.observe(track, preference = preference).collect { document ->
                 if (state.document == null || AudioPlayer.positionMs.value <= MeloXLyricsLoad.AmllUpgradeWindowMs) {
                     state.document = document
                 }
@@ -131,6 +137,7 @@ internal fun LyricsPage(
     onInterfaceVisibilityChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
+    val surface = LocalMeloXLyricSurface.current
     if (MeloXSettingsRuntime.lyricsStyle != melox.settings.MeloXLyricsStyle.AppleMusic) {
         MeloXAlternativeLyricsPanel(track, modifier, onInterfaceInteraction, interactive)
         return
@@ -236,8 +243,8 @@ internal fun LyricsPage(
             "${it.source}:${it.quality};lines=${it.lines.size};pseudoTimingAllowed=${it.pseudoTimingAllowed};pseudoTimingEnabled=${MeloXSettingsRuntime.lyricPseudoTimingEnabled}"
         } ?: "loading"
     }) {
-        val fontScale = MeloXSettingsRuntime.lyricFontScale
-        val focusPosition = MeloXSettingsRuntime.lyricFocusPosition
+        val fontScale = surface.fontScale ?: MeloXSettingsRuntime.lyricFontScale
+        val focusPosition = surface.focusPosition ?: MeloXSettingsRuntime.lyricFocusPosition
         val viewportPx = constraints.maxHeight.toFloat()
         val topPadding = maxHeight * focusPosition
         val bottomPadding = maxOf(maxHeight * (1f - focusPosition), 40.dp)
@@ -252,10 +259,10 @@ internal fun LyricsPage(
             interactive, viewportPx, focusPosition, fontScale)
         when {
             state.loading && state.document == null -> CircularProgressIndicator(
-                color = Color.White.copy(alpha = .9f), modifier = Modifier.align(Alignment.Center))
+                color = surface.foreground.copy(alpha = .9f), modifier = Modifier.align(Alignment.Center))
             state.error != null && state.document == null -> Text(state.error.orEmpty(),
-                color = Color.White.copy(alpha = .52f), fontSize = 15.sp, modifier = Modifier.align(Alignment.Center).padding(24.dp))
-            lines.isEmpty() -> Text("暂无歌词", color = Color.White.copy(alpha = .42f), fontSize = 18.sp,
+                color = surface.foreground.copy(alpha = .52f), fontSize = 15.sp, modifier = Modifier.align(Alignment.Center).padding(24.dp))
+            lines.isEmpty() -> Text("暂无歌词", color = surface.foreground.copy(alpha = .42f), fontSize = 18.sp,
                 modifier = Modifier.align(Alignment.Center))
             else -> Layout(modifier = Modifier.fillMaxSize().clipToBounds(), content = {
               LazyColumn(state = listState, modifier = Modifier.fillMaxSize().nestedScroll(userScroll), userScrollEnabled = interactive) {
@@ -289,7 +296,7 @@ internal fun LyricsPage(
                     val showTranslation = MeloXSettingsRuntime.showLyricTranslation && !line.translation.isNullOrBlank()
                     val visibleTranslation = MeloXLyricPresentation.annotationVisible(MeloXSettingsRuntime.showLyricTranslation,
                         line.translation, MeloXSettingsRuntime.lyricTranslationDisplayMode, focused)
-                    val effectiveBlur = max(blur, focusBlur).let { when (quality) {
+                    val effectiveBlur = max(blur, focusBlur).let { if (!surface.allowsBlur) 0f else when (quality) {
                         MeloXLyricsRenderingQuality.Low -> 0f
                         MeloXLyricsRenderingQuality.Balanced -> it * .55f
                         MeloXLyricsRenderingQuality.High -> it
@@ -320,7 +327,7 @@ internal fun LyricsPage(
                             indication = androidx.compose.foundation.LocalIndication.current,
                             onClick = { if (canTap) { onInterfaceInteraction(); PlaybackCommands.playerController()?.seekTo(line.timeMs) } },
                             onLongClick = if (canShare) ({ onInterfaceInteraction(); state.shareIndex = index }) else null)
-                        .padding(horizontal = 8.dp),
+                        .padding(horizontal = surface.horizontalInset.dp),
                         horizontalAlignment = if (flipped) Alignment.End else Alignment.Start) {
                         line.accompaniment.filter { it.timeMs < line.timeMs }.forEach {
                             MeloXTimedAccompaniment(it, timeProvider, fontScale, MeloXSettingsRuntime.lyricReduceMotion, quality, effectiveBlur)
@@ -348,7 +355,7 @@ internal fun LyricsPage(
                         if (visibleTranslation) {
                             Text(line.translation.orEmpty(), fontSize = translationSize.sp, lineHeight = (translationSize * 1.2f).sp,
                                 fontWeight = MeloXSettingsRuntime.lyricFontWeight.composeWeight, textAlign = textAlign,
-                                color = Color.White.copy(alpha = MeloXSettingsRuntime.lyricTranslationOpacity),
+                                color = surface.foreground.copy(alpha = MeloXSettingsRuntime.lyricTranslationOpacity),
                                 fontFamily = MeloXLanTingProFontFamily,
                                 modifier = Modifier.fillMaxWidth().testTag("lyric-translation-$index").then(rowAlpha).graphicsLayer {
                                     val radius = effectiveBlur.dp.toPx()
@@ -356,7 +363,7 @@ internal fun LyricsPage(
                                 }.padding(top = 4.dp))
                         }
                     }
-                    if (index != lines.lastIndex) Spacer(Modifier.height((28f * MeloXSettingsRuntime.lyricSpacingScale).dp))
+                    if (index != lines.lastIndex) Spacer(Modifier.height((surface.paragraphSpacing ?: (28f * MeloXSettingsRuntime.lyricSpacingScale)).dp))
                 }
                 item(key = "lyrics-bottom-padding") { Spacer(Modifier.height(bottomPadding + with(density) { (estimatedStride * 4f).toDp() })) }
               }

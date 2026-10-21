@@ -45,6 +45,14 @@ enum class MeloXLyricsFontWeight(val composeWeight: FontWeight) {
 
 /** Process-visible settings used by UI paths that need immediate recomposition. */
 object MeloXSettingsRuntime {
+    var desktopLayoutEnabled by mutableStateOf(false)
+        internal set
+    var splitScreenEnabled by mutableStateOf(true)
+        internal set
+    var splitNavigationPosition by mutableStateOf(MeloXSplitChromePosition.BottomLeft)
+        internal set
+    var splitMiniPlayerPosition by mutableStateOf(MeloXSplitChromePosition.BottomLeft)
+        internal set
     var performanceOverlayEnabled by mutableStateOf(false)
         internal set
     var themeMode by mutableStateOf(MeloXThemeMode.System)
@@ -104,6 +112,8 @@ object MeloXSettingsRuntime {
         internal set
     var automaticLyricSelectionEnabled by mutableStateOf(true)
         internal set
+    var bilibiliLyricAudioAlignmentEnabled by mutableStateOf(false)
+        internal set
     var lyricStrongBindingEnabled by mutableStateOf(false)
         internal set
     var showLyricRomanization by mutableStateOf(true)
@@ -131,6 +141,8 @@ object MeloXSettingsRuntime {
     var lyricBackgroundFrameRate by mutableStateOf(24)
         internal set
     var lyricRenderingQuality by mutableStateOf(MeloXLyricsRenderingQuality.High)
+        internal set
+    var lyricLanguage by mutableStateOf("system")
         internal set
     var lyricRomanizationDisplayMode by mutableStateOf(MeloXLyricAnnotationDisplayMode.FocusedLine)
         internal set
@@ -356,6 +368,7 @@ object MeloXSettingsRuntime {
 
     /** Reads only state required to draw the first root frame. The remaining settings load after setContent. */
     fun initializeCritical() {
+        desktopLayoutEnabled = prefs().getBoolean("general_desktop_layout", false)
         themeMode = runCatching {
             MeloXThemeMode.valueOf((prefs().getString("theme_mode", MeloXThemeMode.System.name) ?: MeloXThemeMode.System.name))
         }.getOrDefault(MeloXThemeMode.System)
@@ -437,7 +450,13 @@ object MeloXSettingsRuntime {
         smartQueueEnabled = MeloXPlaybackModePreferences.smartQueue()
         transitionUiEnabled = prefs().getBoolean("transition_ui_enabled", false)
         showLyricTranslation = prefs().getBoolean("lyrics_translation", true)
+        desktopLayoutEnabled = prefs().getBoolean("general_desktop_layout", false)
+        splitScreenEnabled = prefs().getBoolean("general_split_screen", true)
+        splitNavigationPosition = MeloXSplitChromePosition.fromPreference(prefs().getString("general_split_navigation_position", "BottomLeft") ?: "BottomLeft")
+        splitMiniPlayerPosition = MeloXSplitChromePosition.fromPreference(prefs().getString("general_split_mini_player_position", "BottomLeft") ?: "BottomLeft")
+        lyricLanguage = prefs().getString("lyric_language", "system") ?: "system"
         automaticLyricSelectionEnabled = prefs().getBoolean("lyrics_auto_select", true)
+        bilibiliLyricAudioAlignmentEnabled = prefs().getBoolean("bilibili_lyric_audio_alignment", false)
         lyricStrongBindingEnabled = prefs().getBoolean("experimental_lyric_strong_binding", false)
         showLyricRomanization = prefs().getBoolean("lyrics_romanization", false)
         lyricWordByWordEnabled = prefs().getBoolean("lyrics_word_by_word", true)

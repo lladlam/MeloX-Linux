@@ -1,10 +1,35 @@
+# Gradle
 .gradle/
+.kotlin/
 build/
 !gradle/wrapper/gradle-wrapper.jar
+
+# IDE
 .idea/
 *.iml
-.kotlin/
+*.ipr
+*.iws
+
+# Kotlin
+*.class
+*.jar
+*.war
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local configuration
 local.properties
+
+# Python audit caches
+__pycache__/
+*.pyc
+
+# CI package provenance (generated from the exact checked-out GITHUB_SHA).
+desktop/src/main/resources/parity/build-info.properties
+
+# Linux AppImage packaging
 packaging/AppDir/
-packaging/appimagetool
+build/appimagetool*/
 *.AppImage

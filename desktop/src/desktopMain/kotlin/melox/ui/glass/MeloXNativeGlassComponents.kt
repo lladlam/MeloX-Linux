@@ -1,5 +1,8 @@
 package melox.ui.glass
 
+import androidx.compose.foundation.border
+import androidx.compose.ui.unit.sp
+
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
@@ -35,6 +38,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -49,6 +54,7 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.lerp as colorLerp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsPropertyKey
 import androidx.compose.ui.semantics.contentDescription
@@ -60,11 +66,15 @@ import androidx.compose.ui.semantics.toggleableState
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collectLatest
 import melox.ui.foundation.MeloXSymbol
 import melox.ui.foundation.MeloXSymbolIcon
 import melox.ui.glass.publicdemo.PublicInteractiveHighlight
+import melox.ui.glass.publicdemo.PublicDampedDragAnimation
+import melox.ui.glass.publicdemo.publicInspectDragGestures
 import kotlin.math.roundToInt
 
 /**
@@ -124,8 +134,8 @@ fun MeloXGlassButton(
                 role = Role.Button,
                 onClick = onClick,
             )
-            .then(if (enabled) interactiveHighlight.modifier else Modifier)
-            .then(if (enabled) interactiveHighlight.gestureModifier else Modifier)
+            .then(if (enabled && !melox.settings.MeloXSettingsRuntime.frostedGlassEnabled) interactiveHighlight.modifier else Modifier)
+            .then(if (enabled && !melox.settings.MeloXSettingsRuntime.frostedGlassEnabled) interactiveHighlight.gestureModifier else Modifier)
             .padding(contentPadding),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
@@ -173,10 +183,15 @@ fun MeloXGlassToggle(
     enabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
+    if (melox.ui.desktop.LocalDesktopSettingsPresentation.current) {
+        Box(modifier.width(14.dp)) { melox.ui.desktop.DesktopSettingsCheckbox("", checked, "desktop-checkbox", enabled, onChange = onCheckedChange) }
+        return
+    }
     val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val accent = if (dark) Color(0xFF30D158) else Color(0xFF34C759)
     val track = if (dark) Color(0xFF787880).copy(alpha = 0.36f) else Color(0xFF787878).copy(alpha = 0.20f)
     val density = LocalDensity.current
+    val isLtr = LocalLayoutDirection.current == LayoutDirection.Ltr
     val travelPx = with(density) { 20.dp.toPx() }
     val tapThresholdPx = with(density) { 2.dp.toPx() }
     val scope = rememberCoroutineScope()
@@ -186,6 +201,13 @@ fun MeloXGlassToggle(
     val animated = remember { Animatable(if (checked) 1f else 0f) }
     val currentChecked by rememberUpdatedState(checked)
     val currentOnChange by rememberUpdatedState(onCheckedChange)
+    val trackBackdrop = rememberMeloXLayerBackdrop()
+    val pageBackdrop = LocalMeloXLayerBackdrop.current
+    val optics = remember(scope) {
+        PublicDampedDragAnimation(scope, if (checked) 1f else 0f, 0f..1f, .001f, 1f, 1.5f,
+            onDrag = { _, _ -> })
+    }
+    LaunchedEffect(optics) { snapshotFlow { animated.value }.collectLatest(optics::updateValue) }
 
     androidx.compose.runtime.LaunchedEffect(checked, didDrag, settleRevision) {
         val target = if (checked) 1f else 0f
@@ -216,6 +238,13 @@ fun MeloXGlassToggle(
                     enabled
                 }
             }
+            .pointerInput(enabled, optics) {
+                if (!enabled) return@pointerInput
+                // Read-only press observer keeps the optical response alive while
+                // the existing state-owning drag detector consumes movement.
+                publicInspectDragGestures(onDragStart = { optics.press() }, onDragEnd = { optics.release() },
+                    onDragCancel = { optics.release() }) { _, _ -> }
+            }
             .pointerInput(enabled, travelPx) {
                 if (!enabled) return@pointerInput
                 detectTapGestures {
@@ -223,14 +252,15 @@ fun MeloXGlassToggle(
                     didDrag = false
                 }
             }
-            .pointerInput(enabled, travelPx) {
+            .pointerInput(enabled, travelPx, isLtr) {
                 if (!enabled) return@pointerInput
                 detectHorizontalDragGestures(
                     onDragStart = { didDrag = false; dragDistance = 0f },
                     onHorizontalDrag = { _, dragAmount ->
                         dragDistance += kotlin.math.abs(dragAmount)
                         if (dragDistance > tapThresholdPx) didDrag = true
-                        val next = (animated.value + dragAmount / travelPx).coerceIn(0f, 1f)
+                        val delta = dragAmount / travelPx * if (isLtr) 1f else -1f
+                        val next = (animated.value + delta).coerceIn(0f, 1f)
                         scope.launch { animated.snapTo(next) }
                     },
                     onDragEnd = {
@@ -246,6 +276,7 @@ fun MeloXGlassToggle(
         val shown = animated.value
         Box(
             Modifier
+                .then(if (pageBackdrop != null) Modifier.meloXRecordBackdrop(trackBackdrop) else Modifier)
                 .clip(MeloXShapes.capsule)
                 .drawBehind { drawRect(colorLerp(track, accent, shown)) }
                 .size(width = 64.dp, height = 28.dp),
@@ -259,8 +290,23 @@ fun MeloXGlassToggle(
                         y = padding,
                     )
                 }
-                .background(Color.White, MeloXShapes.capsule)
-                .graphicsLayer { alpha = if (enabled) 1f else 0.45f }
+                .graphicsLayer {
+                    val velocity = optics.velocity.glassFinite() / 50f
+                    scaleX = if (pageBackdrop == null) 1f else (optics.scaleX.glassFinite() / (1f - (velocity * .75f).coerceIn(-.2f, .2f))).glassFinite()
+                    scaleY = if (pageBackdrop == null) 1f else (optics.scaleY.glassFinite() * (1f - (velocity * .25f).coerceIn(-.2f, .2f))).glassFinite()
+                    alpha = if (enabled) 1f else .45f
+                }
+                .then(if (pageBackdrop == null) Modifier.background(Color.White, MeloXShapes.capsule) else {
+                    val p = safeGlassProgress(optics.pressProgress)
+                    Modifier.meloXGlassShadow(MeloXShapes.capsule, 1f, .05f, 4.dp)
+                        .meloXGlassDecoration(MeloXShapes.capsule, p, 4.dp * p, p, .15f,
+                            rimWidth = .5.dp / 1.5f, ambient = true)
+                        .clip(MeloXShapes.capsule)
+                        .meloXSampleBackdrop(8.dp * (1f - p), trackBackdrop, shape = MeloXShapes.capsule,
+                            lensHeight = if (p > .001f) 5.dp * p else 0.dp,
+                            lensAmount = if (p > .001f) 10.dp * p else 0.dp, dispersion = true, underlay = pageBackdrop)
+                        .drawBehind { drawRect(Color.White.copy(alpha = 1f - p)) }
+                })
                 .size(width = 40.dp, height = 24.dp),
         )
     }
@@ -281,6 +327,22 @@ fun MeloXGlassTextField(
     keyboardActions: KeyboardActions = KeyboardActions.Default,
     onFocusChanged: ((Boolean) -> Unit)? = null,
 ) {
+    if (melox.ui.desktop.LocalDesktopSettingsPresentation.current) {
+        Row(modifier.heightIn(min = 24.dp).clip(androidx.compose.foundation.shape.RoundedCornerShape(5.dp))
+            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .045f))
+            .border(.5.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = .2f), androidx.compose.foundation.shape.RoundedCornerShape(5.dp))
+            .padding(horizontal = 7.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            leadingContent?.invoke()
+            BasicTextField(value, onValueChange, enabled = enabled, singleLine = singleLine,
+                textStyle = TextStyle(fontFamily = melox.ui.theme.MeloXDesktopTextFontFamily, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface),
+                cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.onSurface),
+                keyboardOptions = keyboardOptions, keyboardActions = keyboardActions,
+                modifier = Modifier.weight(1f).onFocusChanged { onFocusChanged?.invoke(it.isFocused) },
+                decorationBox = { inner -> Box { if (value.isBlank()) placeholder?.invoke(); inner() } })
+            trailingContent?.invoke()
+        }
+        return
+    }
     Row(
         modifier = modifier
             .heightIn(min = 50.dp)
