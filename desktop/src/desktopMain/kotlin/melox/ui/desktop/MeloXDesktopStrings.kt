@@ -37,6 +37,9 @@ internal fun desktopQualityTitle(quality: melox.audio.MusicQuality): String = de
 internal fun desktopPlatformString(key: String): String {
     val chinese = Locale.getDefault().language == "zh"
     return when (key) {
+        "about_developer" -> if (chinese) "开发者：lladlam（MeloX Windows）" else "Developer: lladlam (MeloX Windows)"
+        "about_copyright" -> if (chinese) "© %d lladlam。MeloX 是非官方第三方网易云音乐客户端。" else "© %d lladlam. MeloX is an unofficial third-party NetEase Cloud Music client."
+        "avatar_initial" -> "M"
         "layout_title" -> if (chinese) "电脑端布局" else "Desktop layout"
         "layout_hint" -> if (chinese) "使用 MeloX 电脑端侧栏和底部播放器；关闭可切回当前布局" else "Use the MeloX desktop sidebar and bottom player; turn off to restore the current layout"
         "settings" -> if (chinese) "设置" else "Settings"
@@ -63,6 +66,13 @@ internal fun desktopPlatformString(key: String): String {
             else "No NetEase Cloud Music client sign-in was found. Sign in with the client first."
         "login_choose_profile" -> if (chinese) "发现多个客户端数据目录，请选择后再读取" else "Multiple client profiles were found. Choose one, then import it."
         "services_title" -> if (chinese) "音乐服务" else "Music Services"
+        "tray_title" -> if (chinese) "关闭窗口时隐藏到系统托盘" else "Hide to system tray when closing the window"
+        "caption_title" -> if (chinese) "沉浸式标题栏" else "Immersive title bar"
+        "caption_hint" -> if (chinese) "窗口按钮融入页面背景，跟随界面和主题变化。" else "Blend window controls into the page background and theme."
+        "tray_hint" -> if (chinese) "保留后台播放；从托盘显示窗口或退出 MeloX。" else "Keep playback running; show the window or quit MeloX from the tray."
+        "tray_show" -> if (chinese) "显示 MeloX" else "Show MeloX"
+        "tray_quit" -> if (chinese) "退出 MeloX" else "Quit MeloX"
+        "services_current_source" -> if (chinese) "当前音乐源" else "Current music source"
         "services_providers" -> if (chinese) "音乐服务" else "Providers"
         "services_search" -> if (chinese) "搜索设置" else "Search Settings"
         "services_signed_in" -> if (chinese) "已登录" else "Signed In"

@@ -149,14 +149,19 @@ fun main(args: Array<String>) = runBlocking {
         }
         val scene = ImageComposeScene(width, height, Density(density), coroutineContext = coroutineContext) { MeloXApp() }
         val start = System.nanoTime()
+        var renderClock = start
+        val controlledClock = "--controlled-animation-clock" in args
         suspend fun settle(durationMs: Long) {
             val end = System.nanoTime() + durationMs * 1_000_000L
+            val animationEnd = renderClock + durationMs * 1_000_000L
             var frames = 0
             do {
-                scene.render(System.nanoTime() - start).close()
-                delay(16L)
+                renderClock = if (controlledClock) renderClock + 16_000_000L
+                    else maxOf(renderClock + 16_000_000L, System.nanoTime())
+                scene.render(renderClock - start).close()
+                delay(if (controlledClock) 1L else 16L)
                 frames += 1
-            } while (frames < 3 || System.nanoTime() < end)
+            } while (frames < 3 || if (controlledClock) renderClock < animationEnd else System.nanoTime() < end)
         }
         data class PlaybackCheckpoint(val track: melox.music.model.MusicResourceId, val position: Long, val outputCount: Int)
         val playbackCheckpoints = mutableMapOf<String, PlaybackCheckpoint>()
@@ -280,8 +285,10 @@ fun main(args: Array<String>) = runBlocking {
             val deadline = System.nanoTime() + timeoutMs * 1_000_000L
             while (!condition() && System.nanoTime() < deadline) settle(16)
         }
-        fun capture(name: String) {
-            scene.render(System.nanoTime() - start).use { image ->
+        fun capture(name: String, timestamp: Long? = null) {
+            renderClock = timestamp?.coerceAtLeast(renderClock + 1L)
+                ?: if (controlledClock) renderClock + 1_000_000L else maxOf(renderClock + 1_000_000L, System.nanoTime())
+            scene.render(renderClock - start).use { image ->
                 image.encodeToData(EncodedImageFormat.PNG)?.use { data -> File(output, "$name.png").writeBytes(data.bytes) }
             }
             println("Captured $name: ${width}x$height density=$density")
@@ -302,6 +309,7 @@ fun main(args: Array<String>) = runBlocking {
                 })
                 .put("captured_elapsed_ms", (System.nanoTime() - start) / 1_000_000.0)
                 .put("pointer_mode", if (melox.ui.navigation.MeloXPointerMode.touch) "Touch" else "Mouse")
+                .put("touch_keyboard_requests", melox.platform.MeloXWindowsTouchKeyboard.requestCount.get())
                 .put("page", page ?: JSONObject.NULL)
                 .put("controls_visible", semantics.tagged("player-controls") != null)
                 .put("track", track?.id?.let { "${it.source.storageValue}:${it.value}" } ?: JSONObject.NULL)
@@ -354,10 +362,22 @@ fun main(args: Array<String>) = runBlocking {
             expectations["00-${startTab.lowercase()}"]?.let { assertions -> awaitUi { assertions.all(::assertionMatches) } }
             capture("00-${startTab.lowercase()}")
             assertScene("00-${startTab.lowercase()}")
+            val savedPoints = mutableMapOf<String, Offset>()
             steps.forEachIndexed { index, step ->
                 val (name, coordinates) = step.split(':', limit = 2)
                 val eventStart = System.nanoTime()
-                if (coordinates == "reload-settings") {
+                if (coordinates.startsWith("remember-point@")) {
+                    val tag = coordinates.substringAfter('@')
+                    val node = checkNotNull(scene.captureSemantics().tagged(tag)) { "No production anchor $tag" }
+                    savedPoints[name] = node.boundsInWindow.center
+                } else if (coordinates.startsWith("tap-saved@")) {
+                    val point = checkNotNull(savedPoints[coordinates.substringAfter('@')])
+                    inputEvidence.put(JSONObject().put("step", name).put("type", "Mouse").put("action", "tap-saved-coordinate")
+                        .put("position", JSONArray(listOf(point.x, point.y))))
+                    scene.sendPointerEvent(PointerEventType.Press, point, button = PointerButton.Primary)
+                    settle(32)
+                    scene.sendPointerEvent(PointerEventType.Release, point, button = PointerButton.Primary)
+                } else if (coordinates == "reload-settings") {
                     // Re-read genuine canonical preferences; no validation values are injected.
                     melox.settings.MeloXSettingsRuntime.initialize(force = true)
                 } else if (coordinates == "escape") {
@@ -454,7 +474,10 @@ fun main(args: Array<String>) = runBlocking {
                     val node = checkNotNull(scene.captureSemantics().tagged(tag))
                     scene.sendPointerEvent(PointerEventType.Move, node.boundsInWindow.center)
                 } else if (coordinates.startsWith("reveal@")) {
-                    val tag = coordinates.substringAfter('@')
+                    val revealArgs = coordinates.substringAfter('@').split(',')
+                    val tag = revealArgs[0]
+                    val ownerTag = revealArgs.getOrNull(1)
+                    val initialDirection = if (revealArgs.getOrNull(2) == "up") -1f else 1f
                     var revealed = false
                     // The first settings row centers at 112dp below its 74dp
                     // header. A viewport-percentage guard (18% = 140px here)
@@ -463,28 +486,61 @@ fun main(args: Array<String>) = runBlocking {
                     val bottomGuard = height - 170f * density
                     for (attempt in 0 until 400) {
                         val node = scene.captureSemantics().lastOrNull { it.config.getOrNull(SemanticsProperties.TestTag) == tag }
-                        val centerY = node?.let { it.positionInWindow.y + it.size.height / 2f }
-                        if (centerY != null && centerY in topGuard..bottomGuard && !node.boundsInWindow.isEmpty) {
+                        // Window bounds are authoritative for scroll visibility;
+                        // an offscreen child in verticalScroll clips to empty.
+                        // positionInWindow still carries its unclipped position,
+                        // which is needed to choose the scroll direction.
+                        val rawCenterY = node?.let { it.positionInWindow.y + it.size.height / 2f }
+                        val centerY = node?.takeUnless { it.boundsInWindow.isEmpty }?.boundsInWindow?.center?.y
+                        if (centerY != null && centerY in topGuard..bottomGuard) {
                             // A wheel animation may pass through the target and
                             // keep moving. Confirm visibility after settling.
                             settle(240)
                             val settled = scene.captureSemantics().tagged(tag)
-                            val y = settled?.let { it.positionInWindow.y + it.size.height / 2f }
-                            if (y != null && y in topGuard..bottomGuard && !settled.boundsInWindow.isEmpty) {
+                            val y = settled?.takeUnless { it.boundsInWindow.isEmpty }?.boundsInWindow?.center?.y
+                            if (y != null && y in topGuard..bottomGuard) {
                                 revealed = true
                                 break
                             }
                         }
-                        val direction = if (centerY != null && centerY < topGuard) -1f else 1f
+                        val direction = if (rawCenterY == null) initialDirection else if (rawCenterY < topGuard) -1f else 1f
                         // Traverse long production settings pages by mouse wheel,
                         // with enough distance to return from their last slider.
                         // Aim inside the owning pane. Window center is the divider
                         // in list-detail mode and would scroll the other page.
-                        val centerX = node?.let { it.positionInWindow.x + it.size.width / 2f } ?: width * .5f
-                        scene.sendPointerEvent(PointerEventType.Scroll, Offset(centerX.coerceIn(1f, width - 1f), height * .55f), scrollDelta = Offset(0f, direction * 3f))
+                        val ownerBounds = ownerTag?.let { scene.captureSemantics().tagged(it)?.boundsInWindow }
+                        val centerX = ownerBounds?.center?.x ?: node?.let { it.positionInWindow.x + it.size.width / 2f } ?: width * .5f
+                        val wheelY = ownerBounds?.center?.y ?: height * .55f
+                        scene.sendPointerEvent(PointerEventType.Scroll, Offset(centerX.coerceIn(1f, width - 1f), wheelY), scrollDelta = Offset(0f, direction * 3f))
                         settle(240)
                     }
+                    // Wheel inertia can carry the target back out after the
+                    // loop's last check. Let it stop, then accept a target that
+                    // is genuinely visible instead of scrolling it away again.
+                    for (attempt in 0 until 12) {
+                        if (revealed) break
+                        settle(200)
+                        val settled = scene.captureSemantics().tagged(tag)
+                        val y = settled?.takeUnless { it.boundsInWindow.isEmpty }?.boundsInWindow?.center?.y
+                        if (y != null && y in topGuard..bottomGuard) revealed = true
+                    }
                     check(revealed) { "Could not reveal production node $tag using mouse wheel at $name" }
+                    // A screenshot between reveal and click can exceed the
+                    // production lyric follow delay. Keep this pointer gesture
+                    // atomic while still locating and hitting the actual node.
+                    if (revealArgs.getOrNull(3) == "tap") {
+                        val node = checkNotNull(scene.captureSemantics().tagged(tag))
+                        fun clickable(candidate: SemanticsNode): SemanticsNode? =
+                            if (candidate.config.contains(SemanticsActions.OnClick)) candidate
+                            else candidate.children.firstNotNullOfOrNull(::clickable)
+                        val target = checkNotNull(clickable(node))
+                        check(!target.config.contains(SemanticsProperties.Disabled))
+                        check(!target.boundsInWindow.isEmpty)
+                        val point = target.boundsInWindow.center
+                        scene.sendPointerEvent(PointerEventType.Move, point)
+                        scene.sendPointerEvent(PointerEventType.Press, point, button = PointerButton.Primary)
+                        scene.sendPointerEvent(PointerEventType.Release, point, button = PointerButton.Primary)
+                    }
                 } else if (coordinates.startsWith("wait@")) {
                     settle(coordinates.removePrefix("wait@").toLong())
                 } else if (coordinates.startsWith("text@")) {
@@ -546,17 +602,23 @@ fun main(args: Array<String>) = runBlocking {
                     scene.sendPointerEvent(PointerEventType.Press, point, button = PointerButton.Primary)
                     scene.sendPointerEvent(PointerEventType.Release, point, button = PointerButton.Primary)
                 }
+                // Pointer-target stabilization above can take seconds. Sample the
+                // animation on an explicit frame clock: scene.render takes real
+                // wall time in software, so wall-clock sleeps would overshoot the
+                // requested offsets by hundreds of ms.
+                val frameBase = if (controlledClock) renderClock + 1_000_000L else maxOf(renderClock + 1_000_000L, System.nanoTime())
                 frameOffsets.forEach { offset ->
-                    val remainingMs = (eventStart + offset * 1_000_000L - System.nanoTime()) / 1_000_000L
-                    if (remainingMs > 0) settle(remainingMs)
+                    val target = frameBase + offset * 1_000_000L
                     val frameName = "${(index + 1).toString().padStart(2, '0')}-$name-frame-$offset"
-                    val elapsedMs = (System.nanoTime() - eventStart) / 1_000_000.0
-                    capture(frameName)
+                    val elapsedMs = (target - frameBase) / 1_000_000.0
+                    capture(frameName, target)
                     frameEvidence.put(JSONObject().put("file", "$frameName.png").put("requested_ms", offset).put("actual_ms", elapsedMs))
                 }
                 settle(waitMs)
                 val assertions = expectations[name].orEmpty()
-                if (assertions.isNotEmpty()) awaitUi { assertions.all(::assertionMatches) }
+                if (assertions.isNotEmpty()) awaitUi(timeoutMs = option("--assert-timeout-ms", "5000").toLong()) {
+                    assertions.all(::assertionMatches)
+                }
                 capture("${(index + 1).toString().padStart(2, '0')}-$name")
                 sceneEvidence.getJSONObject(sceneEvidence.length() - 1)
                     .put("action_elapsed_ms", (System.nanoTime() - eventStart) / 1_000_000.0)
@@ -569,6 +631,7 @@ fun main(args: Array<String>) = runBlocking {
             melox.playback.PlaybackCommands.playerController()?.release()
             File(output, "capture.json").writeText(JSONObject()
                 .put("renderer", "production ImageComposeScene")
+                .put("animation_clock", if (controlledClock) "controlled scene time" else "wall clock with explicit frame samples")
                 .put("audio_endpoint", if (pcmOutput == null) "Java Sound physical output" else "VALIDATION_SOFTWARE_PCM_OUTPUT")
                 .put("physical_audible_acceptance", "BLOCKED")
                 .put("pcm_outputs", JSONArray(pcmOutput?.evidence().orEmpty()))

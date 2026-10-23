@@ -5,6 +5,8 @@ import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,19 +17,24 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
+import melox.ui.input.BasicTextField
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -37,8 +44,27 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.*
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.unit.Velocity
+import androidx.compose.ui.zIndex
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.tween
+import kotlin.math.roundToInt
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -86,6 +112,7 @@ internal fun MeloXLibraryPlaylistDetailScreen(
     sharedTransitionScope: SharedTransitionScope,
     animatedVisibilityScope: AnimatedVisibilityScope,
     onSongLikeChanged: (SearchSong, Boolean) -> Unit = { _, _ -> },
+    providedSongs: List<SearchSong>? = null,
 ) {
     val scope = rememberCoroutineScope()
     val cache = remember { NeteaseLibraryCache() }
@@ -113,8 +140,14 @@ internal fun MeloXLibraryPlaylistDetailScreen(
         mutableStateOf(MeloXDetailPalette.LightFallback)
     }
     var sortMode by remember(initialPlaylist.id) { mutableStateOf(MeloXPlaylistSortMode.Original) }
+    var actionPage by remember(initialPlaylist.id) { mutableStateOf<String?>(null) }
+    var actionMessage by remember(initialPlaylist.id) { mutableStateOf<String?>(null) }
+    val sessionRevision by NeteaseSessionStore.revision.collectAsState()
 
     suspend fun refreshSavedState() {
+        isSaved = null
+        currentUserId = null
+        if (providedSongs != null) return
         if (isProviderPlaylist) {
             isSaved = null
             return
@@ -124,16 +157,23 @@ internal fun MeloXLibraryPlaylistDetailScreen(
             isSaved = null
             return
         }
+        val revision = NeteaseSessionStore.revision.value
         runCatching {
             val profile = accountClient.accountProfile(cookie)
-            currentUserId = profile.userId
-            withContext(Dispatchers.IO) {
+            val saved = withContext(Dispatchers.IO) {
                 client.userPlaylistsBlocking(profile.userId)
             }.any { it.id == initialPlaylist.id }
-        }.onSuccess { isSaved = it }
+            profile.userId to saved
+        }.onSuccess { (userId, saved) ->
+            if (revision == NeteaseSessionStore.revision.value) {
+                currentUserId = userId
+                isSaved = saved
+            }
+        }.onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
     }
 
     suspend fun refreshPlaylist() {
+        if (providedSongs != null) return
         loading = true
         errorMessage = null
         if (providerPlaylist != null) {
@@ -149,7 +189,7 @@ internal fun MeloXLibraryPlaylistDetailScreen(
                 }
             }.onSuccess { providerDetail ->
                 detail = MeloXLegacyUiBridge.playlistDetail(providerDetail)
-            }.onFailure { errorMessage = it.message ?: "歌单加载失败" }
+            }.onFailure { if (it is kotlinx.coroutines.CancellationException) throw it; errorMessage = it.message ?: "歌单加载失败" }
         } else {
             runCatching { client.playlistDetail(initialPlaylist.id) }
                 .onSuccess {
@@ -157,6 +197,7 @@ internal fun MeloXLibraryPlaylistDetailScreen(
                     cache.savePlaylistDetail(initialPlaylist.id, it)
                 }
                 .onFailure { failure ->
+                    if (failure is kotlinx.coroutines.CancellationException) throw failure
                     errorMessage = if (failure is IOException) {
                         failure.message ?: "网络连接失败，请检查网络后重试"
                     } else {
@@ -168,7 +209,9 @@ internal fun MeloXLibraryPlaylistDetailScreen(
     }
 
     LaunchedEffect(initialPlaylist.id, providerPlaylist?.id) {
-        if (providerPlaylist != null) {
+        if (providedSongs != null) {
+            loading = false
+        } else if (providerPlaylist != null) {
             refreshPlaylist()
         } else {
             cache.loadPlaylistDetail(initialPlaylist.id)?.let { detail = it }
@@ -179,14 +222,14 @@ internal fun MeloXLibraryPlaylistDetailScreen(
         }
     }
 
-    LaunchedEffect(initialPlaylist.id, isProviderPlaylist) {
+    LaunchedEffect(initialPlaylist.id, isProviderPlaylist, sessionRevision) {
         refreshSavedState()
     }
 
     val displayed = detail?.summary ?: initialPlaylist
-    val songs = detail?.songs.orEmpty()
+    val songs = providedSongs ?: detail?.songs.orEmpty()
     val ownedPlaylistId = displayed.id.takeIf {
-        !isProviderPlaylist &&
+        providedSongs == null && !isProviderPlaylist &&
             displayed.creatorUserId != null && displayed.creatorUserId == currentUserId
     }
 
@@ -196,6 +239,7 @@ internal fun MeloXLibraryPlaylistDetailScreen(
 
     val foreground = if (palette.prefersDarkAppearance) Color.White else Color.Black
     val secondary = foreground.copy(alpha = 0.48f)
+    melox.ui.desktop.MeloXCaptionSurface(palette.background, foreground)
     val orderedSongs = remember(songs, sortMode) {
         when (sortMode) {
             MeloXPlaylistSortMode.Original -> songs
@@ -213,41 +257,104 @@ internal fun MeloXLibraryPlaylistDetailScreen(
         }
     }
 
-    Box(
+    val hiddenSearch = melox.settings.MeloXSettingsRuntime.playlistSearchBarHidden
+    val density = LocalDensity.current
+    val searchMax = with(density) { 64.dp.toPx() }
+    var searchOffset by remember(initialPlaylist.id, hiddenSearch) { mutableFloatStateOf(if (hiddenSearch) 0f else searchMax) }
+    val searchScroll = remember(initialPlaylist.id, searchMax, hiddenSearch) {
+        object : NestedScrollConnection {
+            var lastEvent = 0L
+            var scrolledInGesture = false
+            fun resetGesture() {
+                val now = System.nanoTime()
+                if (now - lastEvent > 200_000_000L) scrolledInGesture = false
+                lastEvent = now
+            }
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (!hiddenSearch || source != NestedScrollSource.UserInput) return Offset.Zero
+                resetGesture()
+                if (available.y < 0f && searchOffset > 0f) {
+                    val previous = searchOffset
+                    searchOffset = (previous + available.y).coerceAtLeast(0f)
+                    return Offset(0f, searchOffset - previous)
+                }
+                return Offset.Zero
+            }
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                if (!hiddenSearch || source != NestedScrollSource.UserInput) return Offset.Zero
+                resetGesture()
+                if (consumed.y != 0f) scrolledInGesture = true
+                if (!scrolledInGesture && available.y > 0f && searchOffset < searchMax) {
+                    val previous = searchOffset
+                    searchOffset = (previous + available.y * .5f).coerceAtMost(searchMax)
+                    return Offset(0f, (searchOffset - previous) * 2f)
+                }
+                return Offset.Zero
+            }
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                if (!hiddenSearch || searchOffset <= 0f || searchOffset >= searchMax) return Velocity.Zero
+                val target = if (searchOffset > searchMax / 2 || available.y > 500f) searchMax else 0f
+                animate(searchOffset, target, animationSpec = tween(if (melox.settings.MeloXSettingsRuntime.reduceMotion) 0 else 250)) { value, _ -> searchOffset = value }
+                return available
+            }
+        }
+    }
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(palette.background),
     ) {
-        Column(
+        val twoColumns = melox.settings.MeloXSettingsRuntime.splitScreenEnabled && maxWidth >= 840.dp && maxHeight >= 600.dp
+        melox.ui.player.MeloXFlowingLightBackdrop(displayed.coverUrl, isPlaying = false,
+            modifier = Modifier.fillMaxSize(), reduceMotion = melox.settings.MeloXSettingsRuntime.reduceMotion)
+        Box(Modifier.fillMaxSize().background(if (palette.prefersDarkAppearance) Color.Black.copy(alpha = .26f) else Color.White.copy(alpha = .46f)))
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .statusBarsPadding(),
+                .statusBarsPadding().nestedScroll(searchScroll),
         ) {
+            Column(Modifier.fillMaxWidth().zIndex(1f)) {
             MeloXLibraryPlaylistToolbar(
                 foreground = foreground,
                 onBack = onBack,
-                onShare = {},
-                showMore = false,
-                onMore = {},
+                onShare = { actionMessage = null; actionPage = "share" },
+                showMore = true,
+                onMore = { actionMessage = null; actionPage = "more" },
             )
+            Box(Modifier.fillMaxWidth().height(with(density) { searchOffset.toDp() }).clipToBounds().testTag("playlist-search-container"),
+                contentAlignment = Alignment.BottomCenter) {
             MeloXLibraryPlaylistSearchField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
                 foreground = foreground,
-                modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+                 modifier = Modifier.padding(start = 18.dp, end = 18.dp, bottom = 10.dp).height(44.dp),
             )
+            }
+            }
 
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = MeloXBottomContentClearanceDp),
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(if (twoColumns) 2 else 1),
+                modifier = Modifier.fillMaxSize().testTag("playlist-tracks").semantics { stateDescription = sortMode.name }.then(if (!hiddenSearch) Modifier.padding(top = 122.dp) else
+                    Modifier.graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }.drawWithContent {
+                        drawContent()
+                        val fraction = ((58.dp.toPx() + searchMax - searchOffset) / size.height).coerceIn(0f, 1f)
+                        drawRect(Brush.verticalGradient(0f to Color.Transparent, fraction to Color.Black, 1f to Color.Black), blendMode = BlendMode.DstIn)
+                    }.layout { measurable, constraints ->
+                        val extra = searchMax.roundToInt()
+                        val placeable = measurable.measure(constraints.copy(minHeight = constraints.minHeight + extra, maxHeight = constraints.maxHeight + extra))
+                        layout(placeable.width, placeable.height - extra) { placeable.place(0, -(searchMax - searchOffset).roundToInt()) }
+                    }),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(top = if (hiddenSearch) 122.dp else 0.dp,
+                    bottom = MeloXBottomContentClearanceDp + if (hiddenSearch) 64.dp else 0.dp),
             ) {
-                item {
+                item(span = { GridItemSpan(maxLineSpan) }) {
                     MeloXStandardPlaylistHero(
                         playlist = displayed,
                         tracks = filteredSongs,
                         foreground = foreground,
                         secondary = secondary,
-                        sourceLabel = displayed.providerPlaylist?.id?.source?.displayName ?: "网易云音乐",
+                         sourceLabel = displayed.providerPlaylist?.id?.source?.displayName
+                             ?: providedSongs?.firstOrNull()?.providerTrack?.id?.source?.displayName ?: "网易云音乐",
                         onPlay = {
                             filteredSongs.firstOrNull()?.let { first ->
                                 PlaybackCommands.playQueue(
@@ -268,20 +375,21 @@ internal fun MeloXLibraryPlaylistDetailScreen(
                             }
                         },
                         isSaved = isSaved == true,
-                        showSaveAction = !isProviderPlaylist,
+                         showSaveAction = providedSongs == null && !isProviderPlaylist && isSaved != null && ownedPlaylistId == null,
                         onToggleSaved = {
-                            if (!isProviderPlaylist && !savingPlaylist) {
+                            if (providedSongs == null && !isProviderPlaylist && ownedPlaylistId == null && !savingPlaylist) {
                                 val desired = isSaved != true
+                                val revision = NeteaseSessionStore.revision.value
+                                val cookie = NeteaseSessionStore.readCookie()
                                 savingPlaylist = true
                                 scope.launch {
-                                    runCatching {
-                                        operationsClient.setPlaylistSubscribed(displayed.id, desired)
-                                    }.onSuccess {
-                                        isSaved = desired
-                                    }.onFailure {
-                                        errorMessage = it.message ?: "歌单收藏操作失败"
-                                    }
-                                    savingPlaylist = false
+                                    try {
+                                        NeteaseMusicOperationsClient(cookieProvider = { cookie }).setPlaylistSubscribed(displayed.id, desired)
+                                        if (revision == NeteaseSessionStore.revision.value) isSaved = desired
+                                    } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                                    catch (failure: Exception) {
+                                        if (revision == NeteaseSessionStore.revision.value) errorMessage = failure.message ?: "歌单收藏操作失败"
+                                    } finally { savingPlaylist = false }
                                 }
                             }
                         },
@@ -291,7 +399,7 @@ internal fun MeloXLibraryPlaylistDetailScreen(
                 }
 
                 when {
-                    loading && songs.isEmpty() -> item {
+                    loading && songs.isEmpty() -> item(span = { GridItemSpan(maxLineSpan) }) {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -301,7 +409,7 @@ internal fun MeloXLibraryPlaylistDetailScreen(
                             CircularProgressIndicator(color = foreground)
                         }
                     }
-                    errorMessage != null && songs.isEmpty() -> item {
+                    errorMessage != null && songs.isEmpty() -> item(span = { GridItemSpan(maxLineSpan) }) {
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -329,7 +437,7 @@ internal fun MeloXLibraryPlaylistDetailScreen(
                             )
                         }
                     }
-                    filteredSongs.isEmpty() -> item {
+                    filteredSongs.isEmpty() -> item(span = { GridItemSpan(maxLineSpan) }) {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -342,7 +450,8 @@ internal fun MeloXLibraryPlaylistDetailScreen(
                     else -> itemsIndexed(
                         items = filteredSongs,
                         key = { _, song -> song.id },
-                    ) { index, song ->
+                     ) { index, song ->
+                        Column {
                         MeloXPlaylistTrackRow(
                             song = song,
                             index = index,
@@ -356,15 +465,15 @@ internal fun MeloXLibraryPlaylistDetailScreen(
                             },
                             onPlayNext = { PlaybackCommands.playNext(song) },
                             onPlayLast = { PlaybackCommands.addToQueue(song) },
-                            endAction = if (ownedPlaylistId != null) {
+                             endAction = if (song.providerTrack?.id?.source?.let { it != melox.music.model.MusicSource.Netease } == true) null else if (ownedPlaylistId != null) {
                                 MeloXSwipeAction("从歌单移除", melox.ui.foundation.MeloXSymbol.Trash, Color(0xFFFF3B30)) {
                                     scope.launch {
                                         runCatching { operationsClient.removeSongFromPlaylist(song.id, ownedPlaylistId) }
                                             .onSuccess { refreshPlaylist() }
-                                            .onFailure { errorMessage = it.message ?: "移除歌曲失败" }
+                                            .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it; errorMessage = it.message ?: "移除歌曲失败" }
                                     }
                                 }
-                            } else {
+                             } else {
                                 MeloXSwipeAction("添加到资料库", melox.ui.foundation.MeloXSymbol.Heart, Color(0xFFFF3B30)) {
                                     scope.launch {
                                         runCatching { operationsClient.setSongLiked(song.id, true) }
@@ -378,7 +487,7 @@ internal fun MeloXLibraryPlaylistDetailScreen(
                                                 }
                                                 onSongLikeChanged(song, true)
                                             }
-                                            .onFailure { errorMessage = it.message ?: "添加到资料库失败" }
+                                            .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it; errorMessage = it.message ?: "添加到资料库失败" }
                                     }
                                 }
                             },
@@ -390,10 +499,61 @@ internal fun MeloXLibraryPlaylistDetailScreen(
                                 color = foreground.copy(alpha = 0.12f),
                             )
                         }
+                        }
                     }
                 }
             }
         }
+        if (songs.isNotEmpty()) errorMessage?.let { message ->
+            Text(message, Modifier.align(Alignment.BottomCenter).padding(horizontal = 20.dp, vertical = 146.dp)
+                .background(Color.Black.copy(alpha = .85f), RoundedCornerShape(12.dp))
+                .testTag("playlist-operation-error").clickable { errorMessage = null }.padding(12.dp), color = Color.White)
+        }
+    }
+    melox.ui.glass.MeloXGlassDialog(actionPage != null, onDismiss = { actionPage = null },
+        modifier = Modifier.testTag("playlist-actions-dialog")) {
+        Text(displayed.name, fontWeight = FontWeight.SemiBold, fontSize = 20.sp)
+        if (actionPage == "share") {
+            val text = remember(displayed, songs, providedSongs != null) {
+                playlistShareText(displayed, songs, providedSongs != null)
+            }
+            androidx.compose.foundation.text.selection.SelectionContainer {
+                Text(text, Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState()).testTag("playlist-share-text"), fontSize = 13.sp)
+            }
+            androidx.compose.material3.TextButton(modifier = Modifier.testTag("playlist-copy-share"), onClick = {
+                try {
+                    java.awt.Toolkit.getDefaultToolkit().systemClipboard.setContents(java.awt.datatransfer.StringSelection(text), null)
+                    actionMessage = "分享内容已复制，可粘贴到其他应用"
+                } catch (failure: Exception) { actionMessage = failure.message ?: "无法访问系统剪贴板" }
+            }) { Text("复制分享内容") }
+        } else {
+            Text("${songs.size} 首歌曲 · ${displayed.creatorName}", fontSize = 13.sp)
+            displayed.description?.takeIf { it.isNotBlank() }?.let { description ->
+                androidx.compose.foundation.text.selection.SelectionContainer {
+                    Text(description, Modifier.heightIn(max = 120.dp).verticalScroll(rememberScrollState()), fontSize = 13.sp)
+                }
+            }
+            MeloXPlaylistSortMode.entries.forEach { mode ->
+                val label = when (mode) {
+                    MeloXPlaylistSortMode.Original -> "原始顺序"
+                    MeloXPlaylistSortMode.Title -> "按歌曲名称排序"
+                    MeloXPlaylistSortMode.Artist -> "按艺人排序"
+                    MeloXPlaylistSortMode.Album -> "按专辑排序"
+                }
+                androidx.compose.material3.TextButton(modifier = Modifier.testTag("playlist-sort:${mode.name}"), onClick = {
+                    sortMode = mode
+                    actionPage = null
+                }) { Text(if (sortMode == mode) "✓ $label" else label) }
+            }
+            if (providedSongs == null) androidx.compose.material3.TextButton(enabled = !loading,
+                modifier = Modifier.testTag("playlist-refresh"), onClick = {
+                    actionPage = null
+                    scope.launch { refreshPlaylist(); refreshSavedState() }
+                }) { Text("刷新歌单") }
+        }
+        actionMessage?.let { Text(it, Modifier.testTag("playlist-action-message"), fontSize = 13.sp) }
+        androidx.compose.material3.TextButton(modifier = Modifier.testTag("playlist-actions-close"),
+            onClick = { actionPage = null }) { Text("关闭") }
     }
 }
 
@@ -428,6 +588,7 @@ private fun MeloXLibraryPlaylistToolbar(
             MeloXLibraryGlassCircleButton(
                 foreground = foreground,
                 size = 44.dp,
+                modifier = Modifier.testTag("playlist-share"),
                 onClick = onShare,
             ) {
                 MeloXShareGlyph(Modifier.size(22.dp), MeloXRed)
@@ -436,6 +597,7 @@ private fun MeloXLibraryPlaylistToolbar(
                 MeloXLibraryGlassCircleButton(
                     foreground = foreground,
                     size = 44.dp,
+                    modifier = Modifier.testTag("playlist-more"),
                     onClick = onMore,
                 ) {
                     MeloXSymbolIcon(
@@ -731,13 +893,14 @@ private fun MeloXPlaylistTrackRow(
 private fun MeloXLibraryGlassCircleButton(
     foreground: Color,
     size: androidx.compose.ui.unit.Dp,
+    modifier: Modifier = Modifier,
     enabled: Boolean = true,
     onClick: () -> Unit,
     content: @Composable () -> Unit,
 ) {
     val interaction = rememberMeloXLiquidInteraction()
     Box(
-        modifier = Modifier
+        modifier = modifier
             .size(size)
             .meloXLiquidButton(
                 shape = CircleShape,

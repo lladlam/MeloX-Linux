@@ -1,12 +1,13 @@
 package melox.ui.screens
 
+import melox.ui.desktop.desktopVerticalScroll
+
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.material3.HorizontalDivider
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.horizontalScroll
@@ -66,9 +67,10 @@ import melox.ui.foundation.MeloXIosTopBar
 import melox.ui.foundation.MeloXIosGroupedList
 import melox.ui.foundation.MeloXSymbolIcon
 import melox.ui.foundation.MeloXSymbol
-import melox.ui.foundation.meloXPageEnter
-import melox.ui.foundation.meloXPageExit
 import melox.ui.navigation.MeloXBackHandler
+import melox.ui.navigation.rememberMeloXPageMotion
+import melox.ui.navigation.meloXPageRecede
+import melox.ui.navigation.MeloXInterruptiblePage
 import melox.ui.glass.MeloXGlassSegmentedControl
 import melox.ui.glass.MeloXGlassTextField
 import melox.ui.glass.MeloXSettingsDropdown
@@ -144,7 +146,8 @@ fun SettingsScreen(
     val scroll = rememberScrollState()
     var detailRoute by remember { mutableStateOf<SettingsRoute?>(null) }
     if (route != null) detailRoute = route
-    MeloXBackHandler(enabled = route != null) { route = null }
+    // Desktop uses its own settings tabs and owns no mobile push stack.
+    MeloXBackHandler(enabled = route != null && MeloXSettingsRuntime.desktopLayoutEnabled) { route = null }
     if (MeloXSettingsRuntime.desktopLayoutEnabled) {
         // The focus effect above also runs for persisted Desktop startup. Keep
         // its requester attached before that effect, just as in the legacy branch.
@@ -166,11 +169,14 @@ fun SettingsScreen(
         return
     }
     Box(Modifier.fillMaxSize().focusRequester(detailFocus).focusable()) {
+    val motion = rememberMeloXPageMotion(route != null)
     val normalized = search.trim().lowercase()
     val visibleSections = SettingsSections.mapNotNull { (title, items) ->
         items.filter { normalized.isBlank() || "${it.title} ${it.subtitle} ${it.keywords}".lowercase().contains(normalized) }
             .takeIf { it.isNotEmpty() }?.let { title to it }
     }
+    Box(Modifier.fillMaxSize().meloXPageRecede(motion, enabled = !melox.ui.layout.LocalMeloXListDetail.current)
+        .testTag("settings-parent-motion")) {
     Column(
         Modifier.fillMaxSize().testTag("settings-root").background(MeloXColors.pageBackground()).verticalScroll(scroll)
              .padding(horizontal = 20.dp).padding(top = 18.dp, bottom = MeloXBottomContentClearanceDp)
@@ -221,13 +227,9 @@ fun SettingsScreen(
             SettingsAccountActions(session)
         }
     }
+    }
     melox.ui.layout.MeloXAdaptiveDetail(route != null, onDismiss = { route = null }) { shown ->
-    AnimatedVisibility(
-        visible = shown,
-        enter = meloXPageEnter(fromRight = true),
-        exit = meloXPageExit(toRight = true),
-        modifier = Modifier.fillMaxSize().zIndex(1f),
-    ) {
+    MeloXInterruptiblePage(shown, motion, onBack = { route = null }, modifier = Modifier.zIndex(1f)) {
         detailRoute?.let { SettingsDetail(it, currentSource, onSourceSelected, onOpenMessages, onBack = { route = null }) }
     }
     }
@@ -328,10 +330,10 @@ private fun DesktopSettingsLayout(
                 Box(Modifier.fillMaxWidth().height(.65.dp).background(colors.outlineVariant.copy(alpha = .7f)))
                 Column(
                     Modifier.fillMaxWidth().weight(1f)
-                        .verticalScroll(rememberScrollState()).padding(16.dp)
+                        .desktopVerticalScroll().padding(16.dp)
                         .then(if (selected == SettingsRoute.General) Modifier.testTag("settings-general") else Modifier),
                 ) {
-                    androidx.compose.foundation.text.BasicTextField(search, { search = it }, singleLine = true,
+                    melox.ui.input.BasicTextField(search, { search = it }, singleLine = true,
                         textStyle = androidx.compose.ui.text.TextStyle(fontFamily = melox.ui.theme.MeloXDesktopTextFontFamily, color = colors.onSurface, fontSize = 13.sp),
                         modifier = Modifier.fillMaxWidth().height(24.dp).clip(RoundedCornerShape(5.dp)).background(colors.onSurface.copy(alpha = .045f))
                             .border(.5.dp, colors.onSurface.copy(alpha = .15f), RoundedCornerShape(5.dp)).padding(horizontal = 7.dp, vertical = 4.dp).testTag("settings-search"),
@@ -507,6 +509,16 @@ private fun GeneralSettings() {
             MeloXSettingsRuntime.desktopLayoutEnabled, "setting-general_desktop_layout",
             subtitle = melox.ui.desktop.desktopPlatformString("layout_hint")) {
             MeloXSettingsPreferences.setBoolean("general_desktop_layout", it)
+        }
+        SettingsExternalToggleRow(melox.ui.desktop.desktopPlatformString("tray_title"),
+            MeloXSettingsRuntime.closeToTrayEnabled, "setting-windows_close_to_tray",
+            subtitle = melox.ui.desktop.desktopPlatformString("tray_hint")) {
+            MeloXSettingsPreferences.setBoolean("windows_close_to_tray", it)
+        }
+        SettingsExternalToggleRow(melox.ui.desktop.desktopPlatformString("caption_title"),
+            MeloXSettingsRuntime.immersiveCaptionEnabled, "setting-windows_immersive_caption",
+            subtitle = melox.ui.desktop.desktopPlatformString("caption_hint")) {
+            MeloXSettingsPreferences.setBoolean("windows_immersive_caption", it)
         }
         SettingsChoice("settings_general_theme", "theme_mode", MeloXSettingsRuntime.themeMode,
             listOf(MeloXThemeMode.System to pinnedString("settings_general_theme_system"), MeloXThemeMode.Light to pinnedString("settings_general_theme_light"),

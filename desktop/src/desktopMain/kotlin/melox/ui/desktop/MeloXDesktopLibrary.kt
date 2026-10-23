@@ -2,8 +2,6 @@ package melox.ui.desktop
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.runtime.*
@@ -15,6 +13,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import melox.account.NeteaseSessionStore
 import melox.account.rememberNeteaseSessionStore
 import melox.library.NeteaseLibraryClient
@@ -38,7 +38,7 @@ internal fun MeloXDesktopProviderLibrary(source: MusicSource, playlists: List<Ne
     onOpen: (NeteasePlaylistSummary) -> Unit) {
     CompositionLocalProvider(LocalTextStyle provides androidx.compose.ui.text.TextStyle(fontFamily = MeloXDesktopTextFontFamily,
         fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)) {
-        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).verticalScroll(rememberScrollState())
+        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).desktopVerticalScroll()
             .padding(horizontal = 34.dp, vertical = 28.dp).testTag("desktop-provider-library")) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -54,11 +54,11 @@ internal fun MeloXDesktopProviderLibrary(source: MusicSource, playlists: List<Ne
                 }
                 playlists.isEmpty() -> Column(Modifier.fillMaxWidth().heightIn(min = 340.dp),
                     horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp, Alignment.CenterVertically)) {
-                    Text(desktopString(if (error == null) "ui.desktop.library.empty" else "ui.desktop.library.sign_in_title"),
+                    Text(desktopString(if (accountName == null) "ui.desktop.library.sign_in_title" else "ui.desktop.library.empty"),
                         fontSize = 22.sp, fontWeight = FontWeight.Bold)
                     Text(error ?: desktopString("ui.desktop.library.empty.message"), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (error == null && accountName == null) DesktopDialogButton("ui.common.login", prominent = true, onClick = onLogin)
-                    else if (error != null) DesktopDialogButton("ui.common.retry", onClick = onRetry)
+                    if (accountName == null) DesktopDialogButton("ui.common.login", prominent = true, tag = "provider-library-login", onClick = onLogin)
+                    if (error != null) DesktopDialogButton("ui.common.retry", tag = "provider-library-retry", onClick = onRetry)
                 }
                 else -> BoxWithConstraints(Modifier.fillMaxWidth()) {
                     val count = floor((maxWidth.value + 20) / 165).toInt().coerceAtLeast(1)
@@ -92,12 +92,12 @@ internal fun MeloXDesktopLibrary(page: String?, onLogin: () -> Unit) {
     val details = remember(cookie) { NeteaseCollectionDetailsClient({ cookie }) }
     val universal = remember(cookie) { NeteaseUniversalSearchClient(cookieProvider = { cookie }) }
     val operations = remember(cookie) { NeteaseMusicOperationsClient(cookieProvider = { cookie }) }
-    var songs by remember(section, cookie) { mutableStateOf<List<SearchSong>>(emptyList()) }
-    var cards by remember(section, cookie) { mutableStateOf<List<DesktopLibraryCard>>(emptyList()) }
-    var playlist by remember(section) { mutableStateOf<NeteasePlaylistSummary?>(null) }
-    var podcast by remember(section) { mutableStateOf<MeloXPodcast?>(null) }
-    var loading by remember(section, cookie) { mutableStateOf(session.isLoggedIn) }
-    var error by remember(section, cookie) { mutableStateOf<String?>(null) }
+    var songs by remember(section, cookie, revision) { mutableStateOf<List<SearchSong>>(emptyList()) }
+    var cards by remember(section, cookie, revision) { mutableStateOf<List<DesktopLibraryCard>>(emptyList()) }
+    var playlist by remember(section, cookie, revision) { mutableStateOf<NeteasePlaylistSummary?>(null) }
+    var podcast by remember(section, cookie, revision) { mutableStateOf<MeloXPodcast?>(null) }
+    var loading by remember(section, cookie, revision) { mutableStateOf(session.isLoggedIn) }
+    var error by remember(section, cookie, revision) { mutableStateOf<String?>(null) }
     var refresh by remember { mutableIntStateOf(0) }
     var creating by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
@@ -107,8 +107,12 @@ internal fun MeloXDesktopLibrary(page: String?, onLogin: () -> Unit) {
         "Artists" -> "ui.library.artists.title"; "Podcasts" -> "ui.navigation.library.podcasts"
         "History" -> "ui.navigation.library.history"; else -> "ui.navigation.library.liked_songs"
     }
-    LaunchedEffect(section, cookie, session.profile?.userId, refresh) {
-        if (!session.isLoggedIn || section in setOf("Cloud", "Downloads")) return@LaunchedEffect
+    LaunchedEffect(section, cookie, revision, refresh) {
+        session.reloadFromStorage()
+        if (!NeteaseSessionStore.containsMusicU(cookie) || section in setOf("Cloud", "Downloads")) {
+            loading = false
+            return@LaunchedEffect
+        }
         loading = true; error = null
         try {
             when (section) {
@@ -116,11 +120,19 @@ internal fun MeloXDesktopLibrary(page: String?, onLogin: () -> Unit) {
                 "Artists" -> cards = details.subscribedArtists().map { artist -> DesktopLibraryCard(artist.id, artist.name, artist.aliases.joinToString(" / "), artist.artworkUrl) { MeloXCollectionLaunchBus.open(MeloXCollectionTarget.Artist(artist.id)) } }
                 "Podcasts" -> cards = universal.subscribedPodcasts().map { value -> DesktopLibraryCard(value.id, value.name, value.host?.nickname.orEmpty(), value.artworkUrl) { podcast = value } }
                 else -> {
-                    val user = session.profile?.userId
-                    if (user != null) {
-                        val data = client.snapshot(user)
-                        if (section == "Playlists") cards = data.playlists.map { value -> DesktopLibraryCard(value.id, value.name, value.creatorName, value.coverUrl) { playlist = value } }
-                        else songs = if (section == "History") data.recentSongs else data.likedSongs
+                    if (section == "History") {
+                        songs = client.recentSongs()
+                    } else {
+                        session.refreshProfile()
+                        currentCoroutineContext().ensureActive()
+                        if (NeteaseSessionStore.revision.value != revision || NeteaseSessionStore.readCookie() != cookie) {
+                            throw CancellationException("Library account changed")
+                        }
+                        val user = session.profile?.userId
+                            ?: throw java.io.IOException(session.errorMessage ?: desktopString("ui.desktop.library.sign_in_message"))
+                        if (section == "Playlists") {
+                            cards = client.userPlaylists(user).map { value -> DesktopLibraryCard(value.id, value.name, value.creatorName, value.coverUrl) { playlist = value } }
+                        } else songs = client.likedSongs(user)
                     }
                 }
             }
@@ -134,7 +146,7 @@ internal fun MeloXDesktopLibrary(page: String?, onLogin: () -> Unit) {
         playlist != null -> PlaylistDetailScreen(requireNotNull(playlist), onBack = { playlist = null })
         podcast != null -> MeloXDesktopPodcastDetail(universal, requireNotNull(podcast)) { podcast = null }
         section in setOf("Songs", "History") -> DesktopLibrarySongs(title, songs, loading, error, { refresh++ }, if (session.isLoggedIn) null else onLogin, tag = "desktop-library:$section")
-        else -> Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).verticalScroll(rememberScrollState()).padding(horizontal = 34.dp, vertical = 28.dp).testTag("desktop-library:$section"), verticalArrangement = Arrangement.spacedBy(22.dp)) {
+        else -> Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).desktopVerticalScroll().padding(horizontal = 34.dp, vertical = 28.dp).testTag("desktop-library:$section"), verticalArrangement = Arrangement.spacedBy(22.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(desktopString(title), Modifier.weight(1f), fontSize = 32.sp, fontWeight = FontWeight.Bold)
                 if (section == "Playlists") DesktopDialogButton("ui.playlists.create.title", session.isLoggedIn, "desktop-library-create") { creating = true }

@@ -72,6 +72,7 @@ kotlin {
 compose.desktop {
     application {
         mainClass = "melox.MainKt"
+        jvmArgs += "--add-opens=java.desktop/java.awt.event=ALL-UNNAMED"
         nativeDistributions {
             targetFormats(TargetFormat.AppImage)
             packageName = "MeloX"
@@ -100,7 +101,7 @@ compose.desktop {
 }
 
 // Production JVM flags (jpackage java-options) must be the flags every replay runs under.
-val productionJvmArgs = listOf("-Xms16m", "-Xmx1g", "-XX:+UseSerialGC", "-Dfile.encoding=UTF-8")
+val productionJvmArgs = listOf("-Xms16m", "-Xmx1g", "-XX:+UseSerialGC", "-Dfile.encoding=UTF-8", "--add-opens=java.desktop/java.awt.event=ALL-UNNAMED")
 
 tasks.register<JavaExec>("captureUi") {
     group = "verification"
@@ -224,6 +225,8 @@ tasks.register<JavaExec>("auditWindowChrome") {
     val compilation = kotlin.targets.getByName("desktop").compilations.getByName("main")
     classpath = files(compilation.output.allOutputs, compilation.runtimeDependencyFiles)
     mainClass.set("melox.validation.MeloXWindowChromeAuditKt")
+    jvmArgs(productionJvmArgs)
+    systemProperty("user.home", layout.buildDirectory.dir("verification/window-chrome-home").get().asFile.absolutePath)
     args(layout.buildDirectory.file("verification/window-chrome.json").get().asFile.absolutePath)
 }
 
@@ -238,4 +241,17 @@ tasks.register<JavaExec>("auditGlassOptics") {
     systemProperty("java.awt.headless", "true")
     systemProperty("user.home", layout.buildDirectory.dir("verification/glass-home").get().asFile.absolutePath)
     args(layout.buildDirectory.file("verification/glass-optics.json").get().asFile.absolutePath)
+}
+
+tasks.register<JavaExec>("auditDesktopGlass") {
+    group = "verification"
+    description = "Verify Desktop side-panel material and live adjacent-page reflection."
+    dependsOn("desktopMainClasses")
+    val compilation = kotlin.targets.getByName("desktop").compilations.getByName("main")
+    classpath = files(compilation.output.allOutputs, compilation.runtimeDependencyFiles)
+    mainClass.set("melox.validation.MeloXDesktopGlassAuditKt")
+    jvmArgs(productionJvmArgs)
+    systemProperty("java.awt.headless", "true")
+    systemProperty("user.home", layout.buildDirectory.dir("verification/desktop-glass-home").get().asFile.absolutePath)
+    args(layout.buildDirectory.dir("verification/desktop-glass").get().asFile.absolutePath)
 }

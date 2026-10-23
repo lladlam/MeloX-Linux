@@ -233,11 +233,14 @@ fun SearchScreen(
         catch (failure: Exception) { categoryError = failure.message ?: pinnedString("search_category_failed") }
         finally { categoryLoading = false }
     }
-    // DesktopSearchView suggestions use a 300ms debounce and only the catalog scope.
-    LaunchedEffect(query, libraryScope, sessionRevision) {
-        if (query.isBlank() || libraryScope || sessionCookie.isBlank()) { searchSuggestions = emptyList(); return@LaunchedEffect }
-        delay(300)
-        searchSuggestions = runCatching { universal.searchSuggestions(query) }.getOrDefault(emptyList())
+    // Suggestions are optional traffic: wait for input to settle and skip one-character prefixes.
+    LaunchedEffect(query, libraryScope, sessionRevision, source, MeloXSettingsRuntime.desktopLayoutEnabled) {
+        searchSuggestions = emptyList()
+        if (!MeloXSettingsRuntime.desktopLayoutEnabled || source != MusicSource.Netease || query.trim().length < 2 || libraryScope) return@LaunchedEffect
+        delay(600)
+        try { searchSuggestions = universal.searchSuggestions(query) }
+        catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+        catch (_: Exception) { searchSuggestions = emptyList() }
     }
 
     LaunchedEffect(query, kind, source, searchTrigger, unifiedEnabled, unifiedSources, sessionRevision, libraryScope) {
@@ -256,6 +259,8 @@ fun SearchScreen(
             return@LaunchedEffect
         }
         error = null
+        if (!skipSearchDebounce) delay(if (MeloXSettingsRuntime.desktopLayoutEnabled) 800 else 1500)
+        skipSearchDebounce = false
         if (libraryScope) {
             songs = emptyList(); providerSongs = emptyList(); media = emptyList(); loading = true
             try {
@@ -293,8 +298,6 @@ fun SearchScreen(
             finally { loading = false }
             return@LaunchedEffect
         }
-        if (!skipSearchDebounce) delay(if (MeloXSettingsRuntime.desktopLayoutEnabled) 320 else 1500)
-        skipSearchDebounce = false
         loading = true
         val linkedId = if (source == MusicSource.Netease) parseSongLink(keyword) else null
         if (linkedId != null) {
@@ -938,7 +941,7 @@ private fun SearchCategoryPage(
 }
 
 @Composable
-private fun ProviderCollectionDetail(
+internal fun ProviderCollectionDetail(
     title: String,
     subtitle: String,
     artwork: String?,
@@ -951,6 +954,7 @@ private fun ProviderCollectionDetail(
     var reload by remember(title, artwork) { mutableIntStateOf(0) }
     LaunchedEffect(title, artwork, reload) {
         loading = true
+        error = null
         runCatching { load() }
             .onSuccess { tracks = it }
             .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it; error = it.message ?: pinnedString("search_content_failed") }

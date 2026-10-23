@@ -115,8 +115,17 @@ fun LibraryScreen(
     navState: MeloXNavState? = null,
     requestedPage: String? = null,
 ) {
+    val requestedSource = MusicProviderSelectionStore.selectedSource()
+    val openSourceLogin: () -> Unit = {
+        melox.ui.navigation.MeloXLoginRequestBus.request(requestedSource)
+        navState?.navigateTo(melox.ui.navigation.Route.Login)
+    }
+    if (requestedSource in setOf(MusicSource.Local, MusicSource.Spotify, MusicSource.YouTubeMusic)) {
+        MeloXProviderLibraryScreen(requestedSource, requestedPage, openSourceLogin)
+        return
+    }
     if (MeloXSettingsRuntime.desktopLayoutEnabled && MusicProviderSelectionStore.selectedSource() == MusicSource.Netease) {
-        melox.ui.desktop.MeloXDesktopLibrary(requestedPage) { navState?.navigateTo(melox.ui.navigation.Route.Login) }
+        melox.ui.desktop.MeloXDesktopLibrary(requestedPage, openSourceLogin)
         return
     }
     val scope = rememberCoroutineScope()
@@ -180,7 +189,7 @@ fun LibraryScreen(
         } else if (source == MusicSource.Local) {
             runCatching {
                 withContext(Dispatchers.IO) {
-                    // Desktop has no MediaStore. Rescan the configured music dirs so the
+                    // Desktop has no MediaStore. Rescan configured music dirs so the
                     // library reflects files added since the last run.
                     melox.provider.local.LocalMediaScanner().scanAll()
                     val tracks = (provider as? LocalAggregationCapability)
@@ -273,14 +282,14 @@ fun LibraryScreen(
 
     if (source == MusicSource.Netease && !session.isLoggedIn) {
         MeloXLibraryLoginUnavailable(
-            onLogin = { navState?.navigateTo(melox.ui.navigation.Route.Login) },
+            onLogin = openSourceLogin,
             sourceName = source.displayName,
         )
         return
     }
-    if (source != MusicSource.Netease && source != MusicSource.Local && !loading && providerAccount == null && errorMessage == null) {
+    if (!MeloXSettingsRuntime.desktopLayoutEnabled && source != MusicSource.Netease && source != MusicSource.Local && !loading && providerAccount == null && errorMessage == null) {
         MeloXLibraryLoginUnavailable(
-            onLogin = { navState?.navigateTo(melox.ui.navigation.Route.Login) },
+            onLogin = openSourceLogin,
             sourceName = source.displayName,
         )
         return
@@ -296,7 +305,7 @@ fun LibraryScreen(
                 loading = loading,
                 error = errorMessage,
                 onRetry = { scope.launch { refreshLibrary() } },
-                onLogin = if (providerAccount == null) ({ navState?.navigateTo(melox.ui.navigation.Route.Login) }) else null,
+                onLogin = openSourceLogin.takeIf { providerAccount == null },
                 tag = "desktop-provider-library:Local",
             )
         } else {
@@ -306,7 +315,7 @@ fun LibraryScreen(
                 loading = loading,
                 error = errorMessage,
                 accountName = providerAccount?.displayName,
-                onLogin = { navState?.navigateTo(melox.ui.navigation.Route.Login) },
+                onLogin = openSourceLogin,
                 onRetry = { scope.launch { refreshLibrary() } },
                 onOpen = { selectedPlaylist = it },
             )
@@ -638,11 +647,21 @@ private fun MeloXLibrarySegmentedPicker(
     source: MusicSource,
     modifier: Modifier = Modifier,
 ) {
-    val pages = MeloXLibraryPage.entries.filter { it.isEnabled(source) }
+    MeloXProviderLibraryPicker(selected.name, { onSelected(MeloXLibraryPage.valueOf(it)) },
+        MeloXLibraryPage.entries.filter { it.isEnabled(source) }.map { it.name to it.title }, modifier)
+}
+
+@Composable
+internal fun MeloXProviderLibraryPicker(
+    selected: String,
+    onSelected: (String) -> Unit,
+    pages: List<Pair<String, String>>,
+    modifier: Modifier = Modifier,
+) {
     val panelShape = MeloXShapes.compact
     val lensShape = RoundedCornerShape(15.dp)
     val dark = MaterialTheme.colorScheme.background.luminance() < .5f
-    val selectedIndex = pages.indexOf(selected).coerceAtLeast(0)
+    val selectedIndex = pages.indexOfFirst { it.first == selected }.coerceAtLeast(0)
     val lensPosition by animateFloatAsState(
         targetValue = selectedIndex.toFloat(),
         animationSpec = spring(
@@ -662,7 +681,7 @@ private fun MeloXLibrarySegmentedPicker(
 
     BoxWithConstraints(
         modifier = modifier
-            .testTag("library-pages").semantics { stateDescription = selected.name }
+            .testTag("library-pages").semantics { stateDescription = selected }
             .fillMaxWidth()
             .height(30.dp)
             .meloXLiquidBottomBar(
@@ -688,7 +707,7 @@ private fun MeloXLibrarySegmentedPicker(
                         .fillMaxHeight(),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(page.title, fontSize = 13.sp)
+                    Text(page.second, fontSize = 13.sp)
                 }
             }
         }
@@ -716,20 +735,20 @@ private fun MeloXLibrarySegmentedPicker(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             pages.forEach { page ->
-                val isSelected = page == selected
+                val isSelected = page.first == selected
                 Box(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
-                        .testTag("library-page:${page.name}")
+                        .testTag("library-page:${page.first}")
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null,
-                        ) { onSelected(page) },
+                        ) { onSelected(page.first) },
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = page.title,
+                        text = page.second,
                         fontSize = 13.sp,
                         fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
                         color = MeloXColors.pageOnBackground(),
@@ -797,7 +816,7 @@ private fun MeloXLibrarySongsPage(
 }
 
 @Composable
-private fun MeloXPlayAllRow(onClick: () -> Unit) {
+internal fun MeloXPlayAllRow(onClick: () -> Unit) {
     val desktop = MeloXSettingsRuntime.desktopLayoutEnabled
     Row(
         modifier = Modifier
@@ -822,7 +841,7 @@ private fun MeloXPlayAllRow(onClick: () -> Unit) {
 }
 
 @Composable
-private fun MeloXLibraryTrackRow(
+internal fun MeloXLibraryTrackRow(
     song: SearchSong,
     onClick: () -> Unit,
 ) {
